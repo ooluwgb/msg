@@ -196,6 +196,23 @@ main() {
             fi
         fi
         echo "✅ Using Python: $PYTHON_CMD (Major Version $PYTHON_VERSION_INT)."
+        
+        # Check for externally-managed environment and provide guidance
+        if [[ "$SYSTEM_ID" == "darwin_arm64" ]] && [[ "$PYTHON_CMD" == "/opt/homebrew/bin/python3" ]]; then
+            echo ""
+            echo "ℹ️  Note: You're using Homebrew Python, which is externally-managed (PEP 668)."
+            echo "   This installer will handle the externally-managed environment automatically."
+            echo ""
+            echo "💡 For best practices, consider using a virtual environment:"
+            echo "   python3 -m venv ~/.msg-venv"
+            echo "   source ~/.msg-venv/bin/activate"
+            echo "   # Then re-run this installer"
+            echo ""
+            echo "   Or install via pipx for isolated application management:"
+            echo "   brew install pipx"
+            echo "   pipx install msg"
+            echo ""
+        fi
     fi
 
 
@@ -284,17 +301,35 @@ main() {
     # Make the script executable and run it using the detected python
     chmod +x "$DEPENDENCY_SCRIPT"
     # We use the explicitly detected PYTHON_CMD variable
+    echo "🔧 Running dependency installer with $PYTHON_CMD..."
     "$PYTHON_CMD" "$DEPENDENCY_SCRIPT"
     DEPENDENCY_EXIT_CODE=$?
     
     if [ $DEPENDENCY_EXIT_CODE -eq 1 ]; then
-        echo "❌ FATAL: Dependency installation failed. Stopping."
+        echo ""
+        echo "❌ FATAL: Dependency installation failed critically."
+        echo "   Essential packages could not be installed."
+        echo "   Installation cannot continue."
+        echo ""
+        echo "💡 Troubleshooting suggestions:"
+        echo "   • Check your internet connection"
+        echo "   • Try creating a virtual environment:"
+        echo "     python3 -m venv ~/.msg-venv && source ~/.msg-venv/bin/activate"
+        echo "   • Then re-run this installer"
+        echo ""
         exit 1 # Re-exit with 1 to trigger the trap/cleanup
     elif [ $DEPENDENCY_EXIT_CODE -eq 2 ]; then
-        echo "⚠️ WARNING: Dependency installation finished with non-fatal issues (Exit Code 2)."
+        echo ""
+        echo "⚠️ WARNING: Dependency installation completed with non-critical issues."
+        echo "   Core functionality should still work, but some features may be limited."
+        echo "   You can continue using the application or retry the installation later."
+        echo ""
         # Exit code 2 is preserved for informational use, but install continues (trap is skipped)
     else
-        echo "✅ Dependencies installed successfully (Exit Code 0)."
+        echo ""
+        echo "✅ Dependencies installed successfully."
+        echo "   All required packages are properly configured."
+        echo ""
     fi
 
 

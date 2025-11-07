@@ -40,15 +40,24 @@ def is_in_virtual_environment() -> bool:
             os.environ.get('VIRTUAL_ENV') is not None)
 
 
+def is_externally_managed_environment() -> bool:
+    """Detect if Python environment is externally managed (PEP 668)."""
+    # Check for EXTERNALLY-MANAGED file which indicates PEP 668 compliance
+    import sysconfig
+    stdlib_dir = Path(sysconfig.get_path('stdlib'))
+    externally_managed_file = stdlib_dir / 'EXTERNALLY-MANAGED'
+    return externally_managed_file.exists()
+
+
 def get_pip_install_args() -> List[str]:
     """Get appropriate pip install arguments based on environment."""
     base_args = [sys.executable, '-m', 'pip', 'install', '--upgrade']
     
     if is_in_virtual_environment():
-        # In virtual environment, don't use --user
         return base_args
+    elif is_externally_managed_environment():
+        return base_args + ['--break-system-packages']
     else:
-        # Not in virtual environment, use --user for safety
         return base_args + ['--user']
 
 
@@ -73,21 +82,55 @@ def load_requirements() -> Tuple[Dict[str, Any], int]:
 
 def compare_versions(current: str, required: str) -> bool:
     """Returns True if the current version is strictly LESS than the required version."""
-    if not current or not required:
-        return True # Assume upgrade needed if version is unknown or missing
+    if not current or current == "0.0.0":
+        return True # Package not installed or unknown version, needs installation
+    if not required:
+        return False # No required version specified, assume current is fine
         
     # Simple version comparison by splitting and comparing tuples
     def parse_version(v):
-        # Ignore non-numeric parts like '-beta', '-ayodele' for comparison simplicity
+        # Remove any suffixes like '-beta', '-ayodele' and split by dots
+        clean_version = v.split('-')[0]
         parts = []
-        for part in v.split('.'):
+        for part in clean_version.split('.'):
             try:
-                parts.append(int(part.split('-')[0]))
+                parts.append(int(part))
             except ValueError:
-                parts.append(part) # Keep non-numeric strings
+                # If we can't parse as int, treat as 0 for comparison
+                parts.append(0)
         return tuple(parts)
+    
+    try:
+        return parse_version(current) < parse_version(required)
+    except Exception:
+        # If version comparison fails, assume upgrade needed
+        return True
+
+
+def check_package_installed(package_name: str) -> Tuple[bool, str]:
+    """Check if a package is installed and return (is_installed, version)."""
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'pip', 'show', package_name],
+            capture_output=True, text=True, check=False
+        )
         
-    return parse_version(current) < parse_version(required)
+        if result.returncode == 0:
+            # Package is installed, extract version
+            for line in result.stdout.splitlines():
+                if line.startswith("Version:"):
+                    version = line.split(":", 1)[1].strip()
+                    return True, version
+            # Package shown but no version found (edge case)
+            return True, "unknown"
+        else:
+            # Package not installed
+            return False, "0.0.0"
+            
+    except Exception as e:
+        print(f"⚠️  Warning: Failed to check package {package_name}: {e}")
+        # Assume not installed if check fails
+        return False, "0.0.0"
 
 
 # --- Step 1: Python Package Management (pip) ---
@@ -95,6 +138,11 @@ def compare_versions(current: str, required: str) -> bool:
 def manage_pip_packages(packages: List[Dict[str, Any]]) -> int:
     """Checks and installs/upgrades packages only if necessary."""
     print_step("Installing Python Packages via pip")
+    
+    if is_externally_managed_environment() and not is_in_virtual_environment():
+        print("⚠️  Warning: Using externally-managed Python environment.")
+        print("   Installing with --break-system-packages flag.")
+        print("   Consider using a virtual environment for better isolation.")
     
     # Track non-fatal (optional or version_update_required: false) failures
     warning_count = 0
@@ -112,37 +160,31 @@ def manage_pip_packages(packages: List[Dict[str, Any]]) -> int:
             continue
             
         try:
-            # Check current installed version
-            result = subprocess.run(
-                [sys.executable, '-m', 'pip', 'show', name],
-                capture_output=True, text=True, check=False
-            )
+            # Check if package is installed and get version
+            is_installed, current_version = check_package_installed(name)
             
-            current_version = "0.0.0"
-            if result.returncode == 0:
-                for line in result.stdout.splitlines():
-                    if line.startswith("Version:"):
-                        current_version = line.split(":", 1)[1].strip()
-                        break
-                        
-            # Check if an upgrade is strictly necessary
-            if compare_versions(current_version, required_version):
-                print(f"  • Upgrading {name} ({current_version} < {required_version})...")
+            if not is_installed:
+                print(f"  • Installing {name} (not currently installed)...")
                 package_spec = f"{name}=={required_version}"
-                
-                # Determine the failure mode for this specific upgrade
+                # Determine the failure mode for this specific installation
                 if is_optional:
-                    # Optional package failure is always non-fatal (Exit 2)
                     packages_to_install.append((package_spec, False))
                 else:
-                    # Non-optional update failure depends on the new attribute
+                    packages_to_install.append((package_spec, is_update_fatal))
+            elif compare_versions(current_version, required_version):
+                print(f"  • Upgrading {name} ({current_version} < {required_version})...")
+                package_spec = f"{name}=={required_version}"
+                # Determine the failure mode for this specific upgrade
+                if is_optional:
+                    packages_to_install.append((package_spec, False))
+                else:
                     packages_to_install.append((package_spec, is_update_fatal))
             else:
                 # User is up-to-date or ahead - skip
                 print(f"  • {name} is up-to-date ({current_version} vs required {required_version}).")
                 
         except Exception as e:
-            print(f"❌ FATAL: Failed to check existence of required package {name}: {e}")
+            print(f"❌ FATAL: Failed to check package {name}: {e}")
             return 1 # Fatal error if we can't even check the package
     
     # 2. Perform installation/upgrade for packages that need it
@@ -151,49 +193,61 @@ def manage_pip_packages(packages: List[Dict[str, Any]]) -> int:
         install_specs = [spec for spec, _ in packages_to_install]
         install_cmd = get_pip_install_args() + install_specs
         
-        env_type = "virtual environment" if is_in_virtual_environment() else "user environment"
+        if is_in_virtual_environment():
+            env_type = "virtual environment"
+        elif is_externally_managed_environment():
+            env_type = "externally-managed environment"
+        else:
+            env_type = "user environment"
+            
         print(f"\n  Installing to {env_type}...")
         
         try:
             print("  Executing batched installation...")
             # Run pip installation
-            subprocess.run(
+            result = subprocess.run(
                 install_cmd, 
                 check=True,
-                capture_output=False
+                capture_output=True,
+                text=True
             )
             print("  ✅ Batched installation complete.")
         except subprocess.CalledProcessError as e:
-            # If user install failed and not in venv, try system install as fallback
-            if not is_in_virtual_environment() and '--user' in install_cmd:
+            # If user install failed and not in venv and not externally managed, try system install as fallback
+            if (not is_in_virtual_environment() and 
+                not is_externally_managed_environment() and 
+                '--user' in install_cmd):
                 print("  ⚠️  User installation failed, trying system installation as fallback...")
                 try:
                     fallback_cmd = [sys.executable, '-m', 'pip', 'install', '--upgrade'] + install_specs
-                    subprocess.run(fallback_cmd, check=True, capture_output=False)
+                    subprocess.run(fallback_cmd, check=True, capture_output=True, text=True)
                     print("  ✅ Fallback system installation successful.")
-                except subprocess.CalledProcessError:
+                except subprocess.CalledProcessError as fallback_error:
                     # Both failed, check criticality
                     print(f"\n❌ Both user and system pip installation failed.")
+                    print(f"   Error: {fallback_error.stderr.strip() if fallback_error.stderr else str(fallback_error)}")
                     is_any_fatal = any(is_fatal for _, is_fatal in packages_to_install)
                     return 1 if is_any_fatal else 2
             else:
                 # Check the error against the required severity
                 print(f"\n❌ Pip installation failed.")
-                print(f"   Error: {e.stderr.strip() if e.stderr else e}")
+                print(f"   Error: {e.stderr.strip() if e.stderr else str(e)}")
                 
                 # Find the most critical failure mode among the packages we tried to install
                 is_any_fatal = any(is_fatal for _, is_fatal in packages_to_install)
 
                 if is_any_fatal:
-                     print("   FATAL: At least one critical update was required (version_update_required: true).")
+                     print("   FATAL: At least one critical package installation failed.")
                      return 1
                 else:
-                     print("   NON-FATAL: Only non-critical updates failed.")
+                     print("   NON-FATAL: Only optional package installations failed.")
                      return 2
             
         except Exception as e:
             print(f"\n❌ FATAL: General error during pip installation: {e}")
             return 1
+    else:
+        print("  ℹ️  All required packages are already up-to-date.")
             
     return 2 if warning_count > 0 else 0
 
@@ -304,43 +358,76 @@ if __name__ == "__main__":
     # 1. Load Requirements
     requirements, code = load_requirements()
     if code != 0:
+        print("❌ FATAL: Cannot proceed without valid requirements configuration.")
         sys.exit(1)
         
     python_packages = requirements.get('python_packages', [])
     nltk_data = requirements.get('nltk_data', [])
     
-    # 2. Manage Python Packages
+    # 2. Manage Python Packages (CRITICAL STEP)
+    print("🔧 Installing Python dependencies...")
     pip_code = manage_pip_packages(python_packages)
-    if pip_code == 1:
-        sys.exit(1) 
     
-    # Update final exit code if a warning occurred
-    if pip_code == 2:
+    if pip_code == 1:
+        print("\n❌ CRITICAL FAILURE: Essential Python packages could not be installed.")
+        print("   Installation cannot continue without these dependencies.")
+        sys.exit(1) 
+    elif pip_code == 2:
+        print("\n⚠️  WARNING: Some optional packages failed to install, but continuing...")
         final_exit_code = 2
+    else:
+        print("\n✅ All Python packages successfully installed/verified.")
 
-    # 3. Manage NLTK Data
-    # Check if 'nltk' was required at all
-    if 'nltk' in [pkg['name'] for pkg in python_packages]:
+    # 3. Manage NLTK Data (only if NLTK was successfully installed)
+    # Check if 'nltk' was required and successfully installed
+    nltk_required = any(pkg['name'].lower() == 'nltk' for pkg in python_packages)
+    
+    if nltk_required:
+        print("🔧 Setting up NLTK data resources...")
+        
+        # Verify NLTK is actually importable before proceeding
+        try:
+            import nltk
+        except ImportError:
+            print("❌ FATAL: NLTK package is required but not available after installation.")
+            sys.exit(1)
+            
         nltk_code = manage_nltk_data(nltk_data)
         
         if nltk_code == 1:
+            print("\n❌ CRITICAL FAILURE: Essential NLTK data could not be downloaded.")
+            print("   Installation cannot continue without these language resources.")
             sys.exit(1) 
-            
-        # Update final exit code if a warning occurred
-        if nltk_code == 2 and final_exit_code == 0:
-            final_exit_code = 2
+        elif nltk_code == 2:
+            print("\n⚠️  WARNING: Some optional NLTK data failed, but continuing...")
+            if final_exit_code == 0:
+                final_exit_code = 2
+        else:
+            print("\n✅ All NLTK data successfully downloaded/verified.")
     else:
         print("ℹ️  Skipping NLTK data management as NLTK is not required in requirements.json.")
         
-    # 4. Final Verification
+    # 4. Final Functionality Verification
+    print("🔍 Performing final functionality verification...")
     try:
         from nltk.stem.porter import PorterStemmer
         stemmer = PorterStemmer()
-        stemmer.stem("running")
-        print("\n✅ Core NLTK Stemmer functionality verified.")
+        test_result = stemmer.stem("running")
+        if test_result != "run":
+            raise Exception(f"Unexpected stemming result: '{test_result}' != 'run'")
+        print("✅ Core NLTK Stemmer functionality verified.")
     except Exception as e:
-        print(f"\n❌ FATAL: NLTK functionality test failed: {e}")
+        print(f"❌ FATAL: NLTK functionality test failed: {e}")
+        print("   This indicates a broken installation that cannot be used.")
         sys.exit(1)
         
-    # Exit with the lowest priority error code (0 > 2 > 1)
+    # 5. Installation Summary
+    if final_exit_code == 0:
+        print("\n🎉 Installation completed successfully!")
+        print("   All dependencies are properly installed and functional.")
+    elif final_exit_code == 2:
+        print("\n⚠️  Installation completed with warnings.")
+        print("   Core functionality is available, but some optional features may be limited.")
+    
+    # Exit with the appropriate code (0 = success, 2 = warnings, 1 = fatal error)
     sys.exit(final_exit_code)
