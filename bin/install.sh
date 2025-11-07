@@ -366,6 +366,8 @@ setup_path_modification() {
     # Check if PATH modification already exists
     if [ -f "$shell_profile" ] && grep -q "/.msg/bin" "$shell_profile"; then
         echo "✅ PATH already configured in $shell_profile"
+        # Update current session PATH even if already configured
+        export PATH="$msg_bin_path:$PATH"
         return
     fi
     
@@ -375,7 +377,19 @@ setup_path_modification() {
     echo "export PATH=\"$msg_bin_path:\$PATH\"" >> "$shell_profile"
     
     echo "✅ Added $msg_bin_path to PATH in $shell_profile"
-    echo "   Run 'source $shell_profile' or restart your terminal to use 'msg' command."
+    
+    # Update PATH for current session
+    export PATH="$msg_bin_path:$PATH"
+    echo "✅ Updated PATH for current session"
+    
+    # Attempt to notify user about sourcing based on their shell
+    local current_shell=$(basename "$SHELL")
+    echo ""
+    echo "📝 To use 'msg' in other open terminals, either:"
+    echo "   1. Restart your terminal, or"
+    echo "   2. Run: source $shell_profile"
+    echo ""
+    echo "🎉 You can use 'msg' command immediately in THIS terminal!"
     
 }
 
