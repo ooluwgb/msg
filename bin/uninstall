@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""
+MSG Uninstaller - The Death Angel
+Complete removal of the msg tool and all associated files.
+This script performs a thorough cleanup of all msg-related installations.
+"""
+import sys
+import os
+import shutil
+from pathlib import Path
+from typing import List, Optional
+
+
+# --- Constants & Paths ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+HOME_DIR = Path.home()
+MSG_ROOT = HOME_DIR / ".msg"
+SYMLINK_PATH = Path("/usr/local/bin/msg")
+
+
+# --- Color Codes ---
+class Colors:
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    GREEN = '\033[92m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    GRAY = '\033[90m'
+    BOLD = '\033[1m'
+    RESET = '\033[0m'
+
+
+def print_death_header():
+    """Print the death angel header."""
+    print(f"\n{Colors.RED}{Colors.BOLD}{'='*70}")
+    print("💀  MSG UNINSTALLER - THE DEATH ANGEL  💀")
+    print(f"{'='*70}{Colors.RESET}")
+    print()
+    print(f"{Colors.YELLOW}⚠️  YOU HAVE INITIATED THE ANGEL OF DEATH ⚠️{Colors.RESET}")
+    print()
+    print("This will remove ALL installations of MSG from your system")
+    print("including your custom files within the MSG directory.")
+    print()
+    print(f"{Colors.CYAN}What will be DESTROYED:{Colors.RESET}")
+    print(f"  💥 Complete MSG directory: {Colors.WHITE}{MSG_ROOT}{Colors.RESET}")
+    print(f"  💥 All custom configurations and data")
+    print(f"  💥 NLTK data downloaded by MSG")
+    print(f"  💥 Global symlinks: {Colors.WHITE}{SYMLINK_PATH}{Colors.RESET}")
+    print(f"  💥 PATH modifications in shell profiles")
+    print()
+    print(f"{Colors.GREEN}What will be PRESERVED:{Colors.RESET}")
+    print(f"  ✅ Python installation and system packages")
+    print(f"  ✅ Files outside the MSG directory")
+    print(f"  ✅ Your personal data and configurations")
+    print()
+    print(f"{Colors.RED}THIS ACTION CANNOT BE UNDONE!{Colors.RESET}")
+
+
+def get_user_confirmation() -> bool:
+    """Get user confirmation with the magic phrase."""
+    print(f"\n{Colors.YELLOW}{'='*50}")
+    print("⚡ CONFIRMATION REQUIRED ⚡")
+    print(f"{'='*50}{Colors.RESET}")
+    print()
+    print("To proceed with the complete destruction, you must type:")
+    print(f"{Colors.BOLD}{Colors.WHITE}confirm_delete{Colors.RESET}")
+    print()
+    print("This ensures you understand the consequences of this action.")
+    print()
+    
+    while True:
+        try:
+            user_input = input(f"{Colors.CYAN}Enter confirmation phrase: {Colors.RESET}").strip()
+            
+            if user_input.lower() == "confirm_delete":
+                return True
+            elif user_input.lower() in ["exit", "quit", "cancel", "abort"]:
+                print(f"\n{Colors.GREEN}✅ Wise choice! Uninstallation aborted.{Colors.RESET}")
+                print("The MSG tool remains safely installed on your system.")
+                return False
+            else:
+                print(f"{Colors.RED}❌ Incorrect phrase. Type 'confirm_delete' to proceed or 'cancel' to abort.{Colors.RESET}")
+                
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n\n{Colors.GREEN}✅ Interrupted by user. Uninstallation aborted.{Colors.RESET}")
+            return False
+
+
+def find_shell_profiles() -> List[Path]:
+    """Find shell profile files that might contain MSG PATH modifications."""
+    possible_profiles = [
+        HOME_DIR / ".zshrc",
+        HOME_DIR / ".bashrc", 
+        HOME_DIR / ".bash_profile",
+        HOME_DIR / ".profile",
+        HOME_DIR / ".config" / "fish" / "config.fish"
+    ]
+    
+    return [profile for profile in possible_profiles if profile.exists()]
+
+
+def remove_path_modifications():
+    """Remove MSG PATH modifications from shell profiles."""
+    print(f"\n{Colors.CYAN}🔍 Scanning shell profiles for PATH modifications...{Colors.RESET}")
+    
+    shell_profiles = find_shell_profiles()
+    removed_count = 0
+    
+    for profile in shell_profiles:
+        try:
+            # Read the file
+            with open(profile, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            # Filter out MSG-related lines
+            original_length = len(lines)
+            filtered_lines = []
+            skip_next = False
+            
+            for i, line in enumerate(lines):
+                if skip_next:
+                    skip_next = False
+                    continue
+                    
+                # Skip MSG-related lines
+                if ("/.msg/bin" in line or 
+                    line.strip() == "# Added by msg installer" or
+                    ("export PATH=" in line and ".msg" in line)):
+                    
+                    # If this is a comment, skip the next line too (likely the export)
+                    if line.strip() == "# Added by msg installer":
+                        skip_next = True
+                    continue
+                    
+                filtered_lines.append(line)
+            
+            # Write back if changes were made
+            if len(filtered_lines) != original_length:
+                with open(profile, 'w', encoding='utf-8') as f:
+                    f.writelines(filtered_lines)
+                
+                removed_count += 1
+                print(f"  💥 Cleaned: {profile}")
+            else:
+                print(f"  ✅ Clean: {profile}")
+                
+        except Exception as e:
+            print(f"  ⚠️  Warning: Could not clean {profile}: {e}")
+    
+    if removed_count > 0:
+        print(f"{Colors.GREEN}✅ Removed PATH modifications from {removed_count} shell profile(s){Colors.RESET}")
+    else:
+        print(f"{Colors.GRAY}ℹ️  No PATH modifications found in shell profiles{Colors.RESET}")
+
+
+def remove_symlinks():
+    """Remove global symlinks."""
+    print(f"\n{Colors.CYAN}🔗 Removing global symlinks...{Colors.RESET}")
+    
+    symlinks_removed = 0
+    
+    # Check and remove /usr/local/bin/msg
+    if SYMLINK_PATH.exists() or SYMLINK_PATH.is_symlink():
+        try:
+            SYMLINK_PATH.unlink()
+            print(f"  💥 Removed: {SYMLINK_PATH}")
+            symlinks_removed += 1
+        except PermissionError:
+            print(f"  ⚠️  Permission denied: {SYMLINK_PATH} (may need sudo)")
+        except Exception as e:
+            print(f"  ⚠️  Error removing {SYMLINK_PATH}: {e}")
+    else:
+        print(f"  ℹ️  No symlink found at {SYMLINK_PATH}")
+    
+    if symlinks_removed > 0:
+        print(f"{Colors.GREEN}✅ Removed {symlinks_removed} global symlink(s){Colors.RESET}")
+
+
+def remove_msg_directory():
+    """Remove the entire MSG directory."""
+    print(f"\n{Colors.CYAN}📁 Removing MSG directory...{Colors.RESET}")
+    
+    if not MSG_ROOT.exists():
+        print(f"{Colors.GRAY}ℹ️  MSG directory not found at {MSG_ROOT}{Colors.RESET}")
+        return
+    
+    try:
+        # Show what's about to be deleted
+        print(f"  📍 Target: {Colors.WHITE}{MSG_ROOT}{Colors.RESET}")
+        
+        # Get directory size for dramatic effect
+        total_size = 0
+        file_count = 0
+        for path in MSG_ROOT.rglob('*'):
+            if path.is_file():
+                file_count += 1
+                try:
+                    total_size += path.stat().st_size
+                except:
+                    pass
+        
+        size_mb = total_size / (1024 * 1024)
+        print(f"  📊 Contains: {file_count} files (~{size_mb:.1f} MB)")
+        
+        # The moment of destruction
+        print(f"\n{Colors.RED}💀 INITIATING COMPLETE DESTRUCTION... 💀{Colors.RESET}")
+        
+        # Remove everything
+        shutil.rmtree(MSG_ROOT)
+        
+        print(f"{Colors.GREEN}✅ MSG directory completely obliterated!{Colors.RESET}")
+        
+    except PermissionError as e:
+        print(f"{Colors.RED}❌ Permission denied: {e}")
+        print(f"Try running with appropriate permissions or contact your administrator.{Colors.RESET}")
+        return False
+    except Exception as e:
+        print(f"{Colors.RED}❌ Error during destruction: {e}{Colors.RESET}")
+        return False
+        
+    return True
+
+
+def print_final_message(success: bool):
+    """Print the final destruction message."""
+    if success:
+        print(f"\n{Colors.RED}{Colors.BOLD}{'='*70}")
+        print("💀  MISSION ACCOMPLISHED - THE ANGEL HAS DEPARTED  💀")
+        print(f"{'='*70}{Colors.RESET}")
+        print()
+        print(f"{Colors.GREEN}✅ MSG has been completely removed from your system!{Colors.RESET}")
+        print()
+        print("What was destroyed:")
+        print("  💥 All MSG application files")
+        print("  💥 All configuration files and custom data")
+        print("  💥 NLTK data downloaded by MSG")
+        print("  💥 Global command access")
+        print("  💥 Shell PATH modifications")
+        print()
+        print(f"{Colors.CYAN}Your system has been restored to pre-MSG state.{Colors.RESET}")
+        print("Python and other system packages remain untouched.")
+        print()
+        print(f"{Colors.YELLOW}Note: You may need to restart your terminal or run 'source ~/.zshrc'")
+        print(f"to update your shell environment.{Colors.RESET}")
+        print()
+        print(f"{Colors.GRAY}Thank you for using MSG. Goodbye! 👋{Colors.RESET}")
+        
+    else:
+        print(f"\n{Colors.RED}💀 DESTRUCTION INCOMPLETE 💀{Colors.RESET}")
+        print()
+        print("Some files may remain. Please check manually and remove:")
+        print(f"  • {MSG_ROOT}")
+        print(f"  • {SYMLINK_PATH}")
+        print("  • MSG entries in shell profiles")
+
+
+def main():
+    """Main uninstall function - The Death Angel."""
+    try:
+        # Display the death angel header
+        print_death_header()
+        
+        # Get user confirmation
+        if not get_user_confirmation():
+            sys.exit(0)
+        
+        # Begin the destruction sequence
+        print(f"\n{Colors.RED}{Colors.BOLD}🔥 BEGINNING DESTRUCTION SEQUENCE 🔥{Colors.RESET}")
+        print(f"{Colors.GRAY}The Angel of Death is now at work...{Colors.RESET}")
+        
+        # Remove PATH modifications from shell profiles
+        remove_path_modifications()
+        
+        # Remove global symlinks  
+        remove_symlinks()
+        
+        # Remove the main MSG directory (the big one)
+        success = remove_msg_directory()
+        
+        # Print final message
+        print_final_message(success)
+        
+        # Exit with appropriate code
+        sys.exit(0 if success else 1)
+        
+    except KeyboardInterrupt:
+        print(f"\n\n{Colors.GREEN}✅ Interrupted by user. The Angel of Death retreats...{Colors.RESET}")
+        print("MSG remains installed on your system.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n{Colors.RED}💀 The Angel of Death encountered an error: {e}{Colors.RESET}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

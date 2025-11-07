@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""
+Message Tags Search Tool - Consolidated Script
+Handles two modes:
+1. List Mode (No keywords): Loads files and outputs ID/Description.
+2. Ranking Mode (Keywords present): Loads files, ranks, limits, and outputs full content.
+Both modes output JSON - no formatting logic.
+"""
+
+import sys
+import json
+import yaml
+import re
+from pathlib import Path
+from typing import List, Dict, Any, Tuple, Callable, Optional, Set
+
+
+# --- Constants & Paths ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+BIN_DIR = BASE_DIR / "bin"
+CONFIG_FILE = BASE_DIR / "config" / "config.yaml"
+CUSTOM_CONFIG_FILE = BASE_DIR / "custom_config.yaml"
+
+
+# --- Configuration & Setup ---
+
+def load_yaml_config(config_path: Path) -> Dict[str, Any]:
+    """Loads and validates the application configuration, merging user overrides with fallback."""
+    
+    base_config = {}
+    warnings = []
+    
+    # 1. Load Base Config
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            base_config = yaml.safe_load(f)
+            if not isinstance(base_config, dict):
+                raise ValueError("Base config file content is invalid or empty.")
+    except FileNotFoundError:
+        return {
+            "error": f"Required base file not found: {CONFIG_FILE.name}",
+            "data_load_directories": [],
+            "default_loaded_response_files": [],
+            "max_display_results": 3
+        }
+    except Exception as e:
+        return {
+            "error": f"Failed to load or parse {CONFIG_FILE.name}: {e}",
+            "data_load_directories": [],
+            "default_loaded_response_files": [],
+            "max_display_results": 3
+        }
+
+    # 2. Load and Apply User Config (with robust fallback)
+    final_config = base_config.copy()
+    
+    if CUSTOM_CONFIG_FILE.exists():
+        try:
+            with open(CUSTOM_CONFIG_FILE, 'r', encoding="utf-8") as f_user:
+                user_config = yaml.safe_load(f_user) or {}
+            
+            if not isinstance(user_config, dict):
+                raise ValueError("Custom config content is invalid.")
+                
+            # Only override specific keys that can be set by the user
+            for key in ["default_loaded_response_files", "data_load_directories", "max_display_results"]:
+                if key in user_config:
+                    final_config[key] = user_config[key]
+
+        except Exception as e:
+            # Fallback: Continue with base_config
+            warnings.append(f"Failed to load or parse {CUSTOM_CONFIG_FILE.name}: {e}")
+    
+    # 3. Final structured validation & extraction
+    return {
+        "data_load_directories": final_config.get("data_load_directories", ["default_load"]),
+        "default_loaded_response_files": final_config.get("default_loaded_response_files", ["response.json"]),
+        "max_display_results": int(final_config.get("max_display_results", 3)),
+        "warnings": warnings
+    }
+
+
+def _setup_stemmer() -> Tuple[Callable[[str], str], Optional[str]]:
+    """Safely sets up NLTK Porter Stemmer, falling back to identity on failure."""
+    try:
+        import nltk
+        from nltk.stem.porter import PorterStemmer
+        import os 
+        
+        # NLTK PATH INJECTION FIX - Use project's hidden nltk_data directory
+        nltk_data_path = BASE_DIR / ".nltk_data"
+        os.environ['NLTK_DATA'] = str(nltk_data_path)
+        
+        try:
+            nltk.data.find('corpora/wordnet')
+            stemmer = PorterStemmer()
+            return stemmer.stem, None
+        except LookupError:
+            return lambda x: x, "NLTK data missing. Stemming disabled (Run msg --upgrade to fix)."
+    except ImportError:
+        return lambda x: x, "NLTK not installed. Stemming disabled (Run msg --upgrade to install)."
+    except Exception as e:
+        return lambda x: x, f"NLTK setup failed: {e}"
+
+
+# --- Helper Functions ---
+
+def _decompose_term(term: str) -> Set[str]:
+    """
+    Performs 'surgery' on a term by splitting it by non-alphanumeric characters,
+    producing component parts and a concatenated version.
+    """
+    term = term.lower()
+    
+    # Split by any character that is NOT a letter or a digit
+    parts = [p for p in re.split(r'[^a-z0-9]', term) if p]
+    
+    results: Set[str] = set()
+    
+    # Check if the term contained non-alphanumeric characters or was broken into multiple parts
+    if len(parts) > 1 or not term.isalnum():
+        
+        # Add component parts (e.g., 'ai', 'studio')
+        for part in parts:
+            results.add(part)
+        
+        # Add the concatenated version (e.g., 'aistudio')
+        if len(parts) > 1:
+            results.add("".join(parts))
+
+    # Always add the original, lowercased term
+    results.add(term)
+    
+    # Remove any empty strings
+    return {r for r in results if r}
+
+
+def _load_json_file(file_path: Path, error_log: List[str]) -> List[Dict[str, Any]]:
+    """Robustly loads a JSON file, returning data or logging an error."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, list):
+                return [data] if isinstance(data, dict) else []
+            return data
+    except Exception as e:
+        error_log.append(f"Failed to read or parse '{file_path.name}': {e}")
+        return []
+
+
+def _extract_content(entry: Dict[str, Any]) -> Any:
+    """Extracts the primary content from an entry (used in Ranking Mode)."""
+    content_keys = ['content', 'message', 'workflow_url', 'grafana_url', 'datalens_url', 'usefull_url']
+    for key in content_keys:
+        if key in entry:
+            return entry[key]
+    return "N/A (Content Field Missing)"
+
+
+# --- Argument Parsing (Unified) ---
+
+def parse_args_unified(cli_args: List[str], default_limit: int) -> Dict[str, Any]:
+    """
+    Parses arguments, separates flags/limit from keywords, and performs decomposition
+    on all resulting keywords.
+    Special handling: --all-files flag means "load all files"
+    """
+    args_copy = list(cli_args)
+    limit = default_limit
+    selected_letters = set()
+    raw_keywords = []
+    load_all_files = False
+
+    # 1. Check for the final number (Limit Override)
+    if args_copy and args_copy[-1].isdigit():
+        limit = int(args_copy.pop(-1))
+
+    # 2. Separate flags from keywords
+    for arg in args_copy:
+        # Check for --all-files special flag
+        if arg == '--all-files':
+            load_all_files = True
+        # Check for regular flag format (-r, -w, etc.)
+        elif arg.startswith('-') and len(arg) > 1 and arg[1].isalpha():
+            flag_letters = arg[1:].lower()
+            selected_letters.update(list(flag_letters))
+        else:
+            # Anything else is considered a raw keyword
+            raw_keywords.append(arg)
+
+    # 3. Decompose raw keywords for search
+    decomposed_keywords = set()
+    for kw in raw_keywords:
+        # Decompose each raw keyword and add all resulting terms
+        decomposed_keywords.update(_decompose_term(kw))
+    
+    # Convert back to list for existing logic compatibility
+    final_keywords = list(decomposed_keywords)
+    
+    return {
+        "keywords": final_keywords,
+        "limit": limit,
+        "selected_letters": list(selected_letters),
+        "has_flags": bool(selected_letters) or load_all_files,
+        "load_all_files": load_all_files
+    }
+
+
+# --- Core Data Loading Logic ---
+
+def load_responses(
+    config: Dict[str, Any],
+    error_log: List[str],
+    warning_log: List[str],
+    target_letters: Optional[List[str]] = None,
+    is_list_mode: bool = False,
+    load_all: bool = False
+) -> List[Dict[str, Any]]:
+    """Loads files based on target letters (flags), loads all files if load_all=True, 
+       or falls back to default files. Performs memory-efficient loading when in List Mode."""
+    
+    load_dirs = config["data_load_directories"]
+    loaded_entries: List[Dict[str, Any]] = []
+    processed_files: Dict[str, bool] = {}
+    
+    # Track if we found any valid directories
+    valid_dirs_found = 0
+    
+    if load_all:
+        # Mode: Load ALL files (--all-files flag)
+        target_patterns = ["*.json"]
+    elif target_letters:
+        # Mode: Flags (-r, -w, etc.) - Load files matching letter patterns
+        target_patterns = [f"{letter}*.json" for letter in target_letters]
+    else:
+        # Mode: Default (No flags) - Explicit file names from config
+        target_patterns = config["default_loaded_response_files"]
+    
+    # Track which patterns found files (across ALL directories)
+    patterns_with_files: Dict[str, bool] = {}
+        
+    # Logic for both modes
+    for dir_name in load_dirs:
+        directory_path = BASE_DIR / dir_name
+        if not directory_path.is_dir():
+            warning_log.append(f"Directory '{dir_name}' not found in {BASE_DIR}")
+            continue
+        
+        valid_dirs_found += 1
+            
+        for pattern in target_patterns:
+            # Check if pattern is a directory at BASE_DIR level (for directory references in config)
+            pattern_as_dir = BASE_DIR / pattern
+            
+            # Determine files to load based on pattern type
+            if pattern_as_dir.is_dir():
+                # Pattern is a directory reference - load all .json files from it
+                files_to_load = list(pattern_as_dir.glob("*.json"))
+            elif '*' in pattern:
+                # Glob pattern (e.g., "r*.json", "*.json")
+                files_to_load = list(directory_path.glob(pattern))
+            elif pattern.endswith('.json'):
+                # Explicit JSON file name
+                file_path = directory_path / pattern
+                files_to_load = [file_path] if file_path.exists() else []
+            else:
+                # Flag-based pattern
+                files_to_load = list(directory_path.glob(pattern))
+            
+            # Mark pattern as found if any files matched
+            if files_to_load:
+                patterns_with_files[pattern] = True
+
+            for file_path in files_to_load:
+                file_name = file_path.name
+                # Only load if not already loaded from a higher priority directory
+                if file_name not in processed_files:
+                    data = _load_json_file(file_path, error_log)
+                    if data:
+                        
+                        if is_list_mode:
+                            # EFFICIENT LIST MODE: Only extract ID and Description
+                            lightweight_data = []
+                            for entry in data:
+                                lightweight_data.append({
+                                    'id': entry.get('id', 'N/A'),
+                                    'description': entry.get('description', '(no description)')
+                                })
+                            loaded_entries.extend(lightweight_data)
+                        else:
+                            # Ranking mode requires full content
+                            loaded_entries.extend(data)
+
+                        processed_files[file_name] = True
+    
+    # Check which patterns found NO files across ALL directories
+    for pattern in target_patterns:
+        if pattern not in patterns_with_files:
+            if load_all:
+                # -a flag mode: warn about no files at all
+                warning_log.append(f"No JSON files found in any configured directory")
+            elif target_letters:
+                # Flag mode: warn about missing pattern
+                warning_log.append(f"No files matching pattern '{pattern}' found in any configured directory")
+            else:
+                # Default mode: warn about missing explicit file
+                warning_log.append(f"File '{pattern}' not found in any configured directory")
+    
+    # Final check: If no valid directories found, that's an error
+    if valid_dirs_found == 0:
+        error_log.append(f"No valid data directories found. Checked: {', '.join(load_dirs)}")
+    
+    # Final check: If no entries loaded at all, add error
+    if not loaded_entries and not error_log:
+        if load_all:
+            error_log.append(f"No JSON files found in any configured directory")
+        elif target_letters:
+            error_log.append(f"No files found matching flags: {', '.join([f'-{l}' for l in target_letters])}")
+        else:
+            error_log.append(f"No data files found in configured directories")
+
+    return loaded_entries
+
+
+
+# --- Core Ranking Logic ---
+
+def run_ranking(
+    loaded_entries: List[Dict[str, Any]],
+    keywords: List[str],
+    stemmer: Callable[[str], str],
+    max_limit: int
+) -> List[Dict[str, Any]]:
+    """Scores, ranks, and truncates entries based on decomposed and stemmed keyword matches."""
+    
+    # Keywords are already decomposed by parse_args_unified. Now just stem them.
+    stemmed_keywords = {stemmer(k.lower()) for k in keywords}
+    scored_results: List[Tuple[int, Dict[str, Any]]] = []
+    
+    for entry in loaded_entries:
+        score = 0
+        
+        # Decompose and Stem Tags
+        raw_tags = entry.get('tags', [])
+        stemmed_entry_tags: Set[str] = set()
+
+        for tag in raw_tags:
+            # 1. Decompose the raw tag
+            decomposed_terms = _decompose_term(tag)
+            
+            # 2. Stem all decomposed terms and add to the final set
+            for term in decomposed_terms:
+                stemmed_entry_tags.add(stemmer(term))
+        
+        entry_tags = stemmed_entry_tags
+        
+        for keyword_stem in stemmed_keywords:
+            if keyword_stem in entry_tags:
+                score += 1
+        
+        if score > 0:
+            entry['_score'] = score
+            scored_results.append((score, entry))
+    
+    scored_results.sort(key=lambda x: x[0], reverse=True)
+    final_results = [entry for _, entry in scored_results[:max_limit]]
+    return final_results
+
+
+# --- Main Execution ---
+
+if __name__ == "__main__":
+    global_errors: List[str] = []
+    global_warnings: List[str] = []
+    
+    # 1. Load configuration and Parse arguments
+    config_data = load_yaml_config(CONFIG_FILE)
+    
+    # Check for config errors
+    if "error" in config_data:
+        output = {
+            "mode": "unknown",
+            "entries": [],
+            "errors": [config_data["error"]],
+            "warnings": []
+        }
+        print(json.dumps(output))
+        sys.exit(1)
+    
+    # Collect config warnings
+    if "warnings" in config_data:
+        global_warnings.extend(config_data["warnings"])
+    
+    args = parse_args_unified(sys.argv[1:], config_data["max_display_results"])
+    
+    # 2. Determine Mode and Load Data
+    target_letters = args["selected_letters"] if args["has_flags"] else None
+    load_all_files = args.get("load_all_files", False)
+    is_list_mode = not args["keywords"]
+    
+    if not is_list_mode:
+        # --- Mode 1: Ranking (Keywords Present) ---
+        
+        # Setup NLTK (required for ranking)
+        stemmer_func, stemmer_error = _setup_stemmer()
+        if stemmer_error:
+            global_warnings.append(stemmer_error)
+            
+        # Load full entries for ranking
+        loaded_data = load_responses(config_data, global_errors, global_warnings, target_letters, is_list_mode=False, load_all=load_all_files) 
+  
+        if not loaded_data:
+            # Add specific error if no data loaded
+            if not global_errors:
+                global_errors.append(f"No matching entries found for keywords: {', '.join(args['keywords'])}")
+            
+            output = {
+                "mode": "ranking",
+                "entries": [],
+                "errors": global_errors,
+                "warnings": global_warnings
+            }
+            print(json.dumps(output))
+            sys.exit(1)
+            
+        # Run ranking and limit results
+        final_results = run_ranking(loaded_data, args["keywords"], stemmer_func, args["limit"])
+        
+        # Check if ranking produced results
+        if not final_results:
+            global_errors.append(f"No matching entries found for keywords: {', '.join(args['keywords'])}")
+        
+        # Prepare output entries with content
+        output_entries = []
+        for entry in final_results:
+            output_entries.append({
+                "id": entry.get('id', 'N/A'),
+                "description": entry.get('description', '(no description)'),
+                "content": _extract_content(entry)
+            })
+        
+        output = {
+            "mode": "ranking",
+            "entries": output_entries,
+            "errors": global_errors,
+            "warnings": global_warnings
+        }
+        
+    else:
+        # --- Mode 2: List (No Keywords) ---
+        
+        # Check for unhandled non-flag arguments
+        if [a for a in sys.argv[1:] if not a.startswith('-') and not a.isdigit()]:
+            output = {
+                "mode": "list",
+                "entries": [],
+                "errors": ["Arguments found that are not keywords or flags."],
+                "warnings": []
+            }
+            print(json.dumps(output))
+            sys.exit(1)
+          
+        # Load lightweight entries for listing
+        loaded_data = load_responses(config_data, global_errors, global_warnings, target_letters, is_list_mode=True, load_all=load_all_files)
+        
+        # List mode entries only have id and description
+        output = {
+            "mode": "list",
+            "entries": loaded_data,
+            "errors": global_errors,
+            "warnings": global_warnings
+        }
+
+    # 3. Output JSON
+    print(json.dumps(output))
+    
+    # Exit code: 0 if any results found, 1 if no results
+    sys.exit(0 if output["entries"] else 1)

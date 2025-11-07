@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""
+Dependency Installer (install_deps.py)
+
+Reads dependencies and versions from requirement.json, installs/upgrades 
+Python packages via pip, and handles NLTK data download and extraction.
+Returns:
+    0: Success (All required packages and data installed/up-to-date)
+    1: Fatal Error (e.g., pip failure, essential package missing, 'version_update_required: true' failed)
+    2: Non-Fatal Warning (e.g., optional package failure, 'version_update_required: false' failed, minor NLTK issues)
+"""
+import sys
+import json
+import subprocess
+import os
+import zipfile
+from pathlib import Path
+from typing import Dict, List, Any, Tuple
+
+# --- Configuration & Paths ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+REQUIREMENTS_FILE = BASE_DIR / "config" / "requirement.json"
+# NLTK data location in hidden directory within project
+NLTK_DATA_PATH = BASE_DIR / ".nltk_data"
+# Ensure NLTK uses our custom path for data files
+os.environ['NLTK_DATA'] = str(NLTK_DATA_PATH)
+
+
+# --- Helper Functions ---
+
+def print_step(message: str) -> None:
+    """Prints a stylized step header."""
+    print(f"\n\033[1m==> {message}\033[0m")
+
+
+def is_in_virtual_environment() -> bool:
+    """Detect if we're running in a virtual environment."""
+    return (hasattr(sys, 'real_prefix') or 
+            (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix) or
+            os.environ.get('VIRTUAL_ENV') is not None)
+
+
+def get_pip_install_args() -> List[str]:
+    """Get appropriate pip install arguments based on environment."""
+    base_args = [sys.executable, '-m', 'pip', 'install', '--upgrade']
+    
+    if is_in_virtual_environment():
+        # In virtual environment, don't use --user
+        return base_args
+    else:
+        # Not in virtual environment, use --user for safety
+        return base_args + ['--user']
+
+
+def load_requirements() -> Tuple[Dict[str, Any], int]:
+    """Loads and validates the requirements JSON file."""
+    if not REQUIREMENTS_FILE.exists():
+        print(f"❌ FATAL: Requirement file not found at {REQUIREMENTS_FILE}")
+        return {}, 1
+        
+    try:
+        with open(REQUIREMENTS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+        if not isinstance(data, dict):
+            raise ValueError("Invalid JSON format (expected root object).")
+            
+        return data, 0
+    except Exception as e:
+        print(f"❌ FATAL: Failed to load/parse {REQUIREMENTS_FILE.name}: {e}")
+        return {}, 1
+
+
+def compare_versions(current: str, required: str) -> bool:
+    """Returns True if the current version is strictly LESS than the required version."""
+    if not current or not required:
+        return True # Assume upgrade needed if version is unknown or missing
+        
+    # Simple version comparison by splitting and comparing tuples
+    def parse_version(v):
+        # Ignore non-numeric parts like '-beta', '-ayodele' for comparison simplicity
+        parts = []
+        for part in v.split('.'):
+            try:
+                parts.append(int(part.split('-')[0]))
+            except ValueError:
+                parts.append(part) # Keep non-numeric strings
+        return tuple(parts)
+        
+    return parse_version(current) < parse_version(required)
+
+
+# --- Step 1: Python Package Management (pip) ---
+
+def manage_pip_packages(packages: List[Dict[str, Any]]) -> int:
+    """Checks and installs/upgrades packages only if necessary."""
+    print_step("Installing Python Packages via pip")
+    
+    # Track non-fatal (optional or version_update_required: false) failures
+    warning_count = 0
+    # List of packages that NEED installation/upgrade and their required failure mode
+    packages_to_install: List[Tuple[str, bool]] = [] # (pkg_name_spec, is_fatal_if_failed)
+    
+    for pkg in packages:
+        name = pkg.get('name')
+        required_version = pkg.get('version')
+        is_optional = pkg.get('optional', False)
+        # New control attribute: True means failure is fatal (Exit 1), False means non-fatal (Exit 2)
+        is_update_fatal = pkg.get('version_update_required', True)
+        
+        if not name or not required_version:
+            continue
+            
+        try:
+            # Check current installed version
+            result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'show', name],
+                capture_output=True, text=True, check=False
+            )
+            
+            current_version = "0.0.0"
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if line.startswith("Version:"):
+                        current_version = line.split(":", 1)[1].strip()
+                        break
+                        
+            # Check if an upgrade is strictly necessary
+            if compare_versions(current_version, required_version):
+                print(f"  • Upgrading {name} ({current_version} < {required_version})...")
+                package_spec = f"{name}=={required_version}"
+                
+                # Determine the failure mode for this specific upgrade
+                if is_optional:
+                    # Optional package failure is always non-fatal (Exit 2)
+                    packages_to_install.append((package_spec, False))
+                else:
+                    # Non-optional update failure depends on the new attribute
+                    packages_to_install.append((package_spec, is_update_fatal))
+            else:
+                # User is up-to-date or ahead - skip
+                print(f"  • {name} is up-to-date ({current_version} vs required {required_version}).")
+                
+        except Exception as e:
+            print(f"❌ FATAL: Failed to check existence of required package {name}: {e}")
+            return 1 # Fatal error if we can't even check the package
+    
+    # 2. Perform installation/upgrade for packages that need it
+    if packages_to_install:
+        
+        install_specs = [spec for spec, _ in packages_to_install]
+        install_cmd = get_pip_install_args() + install_specs
+        
+        env_type = "virtual environment" if is_in_virtual_environment() else "user environment"
+        print(f"\n  Installing to {env_type}...")
+        
+        try:
+            print("  Executing batched installation...")
+            # Run pip installation
+            subprocess.run(
+                install_cmd, 
+                check=True,
+                capture_output=False
+            )
+            print("  ✅ Batched installation complete.")
+        except subprocess.CalledProcessError as e:
+            # If user install failed and not in venv, try system install as fallback
+            if not is_in_virtual_environment() and '--user' in install_cmd:
+                print("  ⚠️  User installation failed, trying system installation as fallback...")
+                try:
+                    fallback_cmd = [sys.executable, '-m', 'pip', 'install', '--upgrade'] + install_specs
+                    subprocess.run(fallback_cmd, check=True, capture_output=False)
+                    print("  ✅ Fallback system installation successful.")
+                except subprocess.CalledProcessError:
+                    # Both failed, check criticality
+                    print(f"\n❌ Both user and system pip installation failed.")
+                    is_any_fatal = any(is_fatal for _, is_fatal in packages_to_install)
+                    return 1 if is_any_fatal else 2
+            else:
+                # Check the error against the required severity
+                print(f"\n❌ Pip installation failed.")
+                print(f"   Error: {e.stderr.strip() if e.stderr else e}")
+                
+                # Find the most critical failure mode among the packages we tried to install
+                is_any_fatal = any(is_fatal for _, is_fatal in packages_to_install)
+
+                if is_any_fatal:
+                     print("   FATAL: At least one critical update was required (version_update_required: true).")
+                     return 1
+                else:
+                     print("   NON-FATAL: Only non-critical updates failed.")
+                     return 2
+            
+        except Exception as e:
+            print(f"\n❌ FATAL: General error during pip installation: {e}")
+            return 1
+            
+    return 2 if warning_count > 0 else 0
+
+
+# --- Step 2: NLTK Data Management ---
+
+def extract_nltk_zips() -> int:
+    """Extracts all zip files within the NLTK_DATA_PATH to make resources accessible."""
+    print_step("Extracting NLTK Data Archives")
+    
+    if not NLTK_DATA_PATH.exists():
+        print("ℹ️  NLTK data directory not found. Skipping extraction.")
+        return 0
+
+    extracted_count = 0
+    warning_count = 0
+    
+    for item in NLTK_DATA_PATH.rglob('*'):
+        if item.is_file() and item.suffix == '.zip':
+            
+            target_dir = item.parent 
+            stem_name = item.stem
+            
+            if (target_dir / stem_name).exists():
+                continue
+
+            try:
+                print(f"  • Extracting {item.name}...")
+                with zipfile.ZipFile(item, 'r') as zip_ref:
+                    zip_ref.extractall(target_dir)
+                extracted_count += 1
+            except Exception as e:
+                print(f"⚠️  WARNING: Failed to extract {item.name}: {e}")
+                warning_count += 1
+
+    if extracted_count > 0:
+        print(f"  ✅ Successfully extracted {extracted_count} new archive(s).")
+    elif warning_count == 0:
+        print("  ℹ️  All NLTK archives already extracted.")
+        
+    return 2 if warning_count > 0 else 0
+
+
+def manage_nltk_data(resources: List[Dict[str, Any]]) -> int:
+    """Downloads required NLTK resources and triggers zip extraction."""
+    print_step("Downloading NLTK Data Resources")
+    
+    NLTK_DATA_PATH.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        import nltk 
+        
+        warning_count = 0
+        
+        for res in resources:
+            resource_name = res.get('resource')
+            is_optional = res.get('optional', False)
+            
+            if not resource_name:
+                continue
+                
+            try:
+                # Check if resource is already found/downloaded
+                nltk.data.find(resource_name)
+                print(f"  • {resource_name} data is already present.")
+            except LookupError:
+                 try:
+                    # Attempt download if not found
+                    print(f"  • Downloading {resource_name}...")
+                    nltk.download(resource_name, download_dir=str(NLTK_DATA_PATH), quiet=True)
+                    print(f"  ✅ {resource_name} downloaded.")
+                 except Exception as e:
+                    if is_optional:
+                        print(f"⚠️  WARNING: Failed to download optional resource {resource_name}: {e}")
+                        warning_count += 1
+                    else:
+                        print(f"❌ FATAL: Failed to download required resource {resource_name}.")
+                        return 1
+            except Exception as e:
+                 if is_optional:
+                    print(f"⚠️  WARNING: Error checking optional resource {resource_name}: {e}")
+                    warning_count += 1
+                 else:
+                    print(f"❌ FATAL: Error checking required resource {resource_name}: {e}")
+                    return 1
+        
+        # 2. Extract zips
+        extract_code = extract_nltk_zips()
+        
+        if extract_code == 2 or warning_count > 0:
+             return 2 
+        return 0 
+        
+    except ImportError:
+        print("❌ FATAL: NLTK Python package is missing. Cannot manage data resources.")
+        return 1
+    except Exception as e:
+        print(f"❌ FATAL: Unhandled error in NLTK management: {e}")
+        return 1
+
+
+# --- Main Execution ---
+
+if __name__ == "__main__":
+    
+    final_exit_code = 0
+    
+    # 1. Load Requirements
+    requirements, code = load_requirements()
+    if code != 0:
+        sys.exit(1)
+        
+    python_packages = requirements.get('python_packages', [])
+    nltk_data = requirements.get('nltk_data', [])
+    
+    # 2. Manage Python Packages
+    pip_code = manage_pip_packages(python_packages)
+    if pip_code == 1:
+        sys.exit(1) 
+    
+    # Update final exit code if a warning occurred
+    if pip_code == 2:
+        final_exit_code = 2
+
+    # 3. Manage NLTK Data
+    # Check if 'nltk' was required at all
+    if 'nltk' in [pkg['name'] for pkg in python_packages]:
+        nltk_code = manage_nltk_data(nltk_data)
+        
+        if nltk_code == 1:
+            sys.exit(1) 
+            
+        # Update final exit code if a warning occurred
+        if nltk_code == 2 and final_exit_code == 0:
+            final_exit_code = 2
+    else:
+        print("ℹ️  Skipping NLTK data management as NLTK is not required in requirements.json.")
+        
+    # 4. Final Verification
+    try:
+        from nltk.stem.porter import PorterStemmer
+        stemmer = PorterStemmer()
+        stemmer.stem("running")
+        print("\n✅ Core NLTK Stemmer functionality verified.")
+    except Exception as e:
+        print(f"\n❌ FATAL: NLTK functionality test failed: {e}")
+        sys.exit(1)
+        
+    # Exit with the lowest priority error code (0 > 2 > 1)
+    sys.exit(final_exit_code)

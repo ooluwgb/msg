@@ -1,0 +1,44 @@
+# msg_development/bin/config.yaml
+
+# Application Configuration for the 'msg' command-line tool
+
+# 1. Default Search Settings
+# -------------------------
+
+# Files to load when 'msg' is run without any file flags (e.g., 'msg keyword').
+# Can be:
+#   - Specific JSON files (e.g., response.json)
+#   - Directory names (loads all .json from that directory, e.g., custom_load)
+#   - Mix of both
+default_loaded_response_files:
+  - response.json
+
+# How many results to show for a keyword search (e.g., the top ranked 3 matches).
+max_display_results: 2
+
+
+# 2. Data Structure and Directory Settings
+# ----------------------------------------
+
+# The unique 2-3 letter codes used at the start of your entry IDs (e.g., rsp1, esc3).
+# Used by the dispatcher to tell the difference between an ID and a search keyword.
+id_prefixes:
+  - rsp 
+  - esc 
+  - wrk 
+  - grf 
+  - dtl 
+  - npc 
+  - url 
+
+# The folders (directories) where the script looks for all data files.
+# The order matters: files in the first listed folder take priority.
+data_load_directories:
+  - default_load
+  - custom_load
+
+# Debug mode for printer (shows session protocol messages)
+debug_mode: false
+
+# Colored output for printer (ANSI color codes)
+colored_output: true

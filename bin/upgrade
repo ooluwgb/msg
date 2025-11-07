@@ -1,0 +1,630 @@
+#!/usr/bin/env python3
+"""
+MSG Upgrade Manager
+Handles --upgrade functionality with robust version checking, authentication,
+and safe upgrade process with rollback capabilities.
+"""
+import sys
+import os
+import json
+import subprocess
+import shutil
+import urllib.request
+import urllib.error
+import hashlib
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple
+import tempfile
+import time
+
+
+# --- Constants & Paths ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+HOME_DIR = Path.home()
+MSG_ROOT = HOME_DIR / ".msg"
+INSTALL_ROOT = MSG_ROOT
+UPGRADE_TMP = MSG_ROOT / "installation" / "upgrade_tmp"
+REPO_CLONE_PATH = MSG_ROOT / "installation" / "msg"
+VERSION_FILE = MSG_ROOT / "config" / "version.json"
+REQUIREMENTS_FILE = MSG_ROOT / "config" / "requirement.json"
+PRIVATE_KEY_FILE = HOME_DIR / ".ssh" / "msg"
+
+# Repository URLs
+REPO_URL = "git@github.com:ooluwgb/msg_development.git"
+PUBLIC_VERSION_URL = "https://raw.githubusercontent.com/ooluwgb/msg/main/config/version.json"
+
+# System detection
+SYSTEM_ID = "darwin_arm64"  # This could be made dynamic later
+
+
+# --- Color Codes ---
+class Colors:
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    GREEN = '\033[92m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    GRAY = '\033[90m'
+    BOLD = '\033[1m'
+    RESET = '\033[0m'
+
+
+# --- Helper Functions ---
+
+def print_step(message: str) -> None:
+    """Prints a stylized step header."""
+    print(f"\n{Colors.BOLD}==> {message}{Colors.RESET}")
+
+
+def print_error(message: str) -> None:
+    """Prints an error message."""
+    print(f"{Colors.RED}❌ Error: {message}{Colors.RESET}")
+
+
+def print_success(message: str) -> None:
+    """Prints a success message."""
+    print(f"{Colors.GREEN}✅ {message}{Colors.RESET}")
+
+
+def print_warning(message: str) -> None:
+    """Prints a warning message."""
+    print(f"{Colors.YELLOW}⚠️  Warning: {message}{Colors.RESET}")
+
+
+def print_info(message: str) -> None:
+    """Prints an info message."""
+    print(f"{Colors.CYAN}ℹ️  {message}{Colors.RESET}")
+
+
+def cleanup_directories() -> None:
+    """Clean up temporary directories."""
+    directories_to_clean = [UPGRADE_TMP, REPO_CLONE_PATH]
+    
+    for directory in directories_to_clean:
+        if directory.exists():
+            try:
+                shutil.rmtree(directory)
+                print(f"  🧹 Cleaned: {directory}")
+            except Exception as e:
+                print_warning(f"Could not clean {directory}: {e}")
+
+
+# --- Authentication Functions ---
+
+def check_ssh_authentication() -> bool:
+    """Validate SSH key exists and has proper permissions."""
+    if not PRIVATE_KEY_FILE.exists():
+        print_error("SSH Authentication Failed: Access Denied 🚫")
+        print()
+        print(f"Oh no! It seems you don't have the golden ticket.")
+        print(f"We can't proceed with the upgrade without proper access.")
+        print(f"We are looking for your private key file: {Colors.WHITE}{PRIVATE_KEY_FILE}{Colors.RESET}")
+        print()
+        print(f"{Colors.YELLOW}👉 ACTION REQUIRED:{Colors.RESET} Ensure your SSH key is properly configured.")
+        print("If you've lost your key, contact your admin for a new one.")
+        return False
+
+    # Check SSH key permissions for security
+    try:
+        key_perms = oct(PRIVATE_KEY_FILE.stat().st_mode)[-3:]
+        if key_perms != "600":
+            print_warning(f"SSH key permissions are {key_perms}, should be 600 for security.")
+            print("   Fixing permissions automatically...")
+            PRIVATE_KEY_FILE.chmod(0o600)
+            print_success("SSH key permissions fixed.")
+    except Exception as e:
+        print_error(f"Could not check/fix SSH key permissions: {e}")
+        return False
+
+    print_success("SSH authentication validated.")
+    return True
+
+
+# --- Version Management Functions ---
+
+def download_latest_version_info() -> Optional[Dict[str, Any]]:
+    """Download the latest version information from GitHub."""
+    try:
+        print_info("Downloading latest version information...")
+        
+        # Create upgrade temp directory
+        UPGRADE_TMP.mkdir(parents=True, exist_ok=True)
+        
+        # Download version.json
+        with urllib.request.urlopen(PUBLIC_VERSION_URL, timeout=10) as response:
+            version_data = response.read().decode('utf-8')
+        
+        # Parse JSON
+        version_info = json.loads(version_data)
+        
+        # Save to upgrade_tmp for reference
+        version_file_path = UPGRADE_TMP / "version.json"
+        with open(version_file_path, 'w', encoding='utf-8') as f:
+            json.dump(version_info, f, indent=2)
+        
+        print_success(f"Downloaded version info: {version_info}")
+        return version_info
+        
+    except urllib.error.URLError as e:
+        print_error(f"Network error downloading version info: {e}")
+        print("Please check your internet connection and try again.")
+        return None
+    except json.JSONDecodeError as e:
+        print_error(f"Invalid version file format: {e}")
+        return None
+    except Exception as e:
+        print_error(f"Failed to download version info: {e}")
+        return None
+
+
+def get_current_version() -> Optional[str]:
+    """Get the currently installed version."""
+    try:
+        if not VERSION_FILE.exists():
+            print_warning("No version file found. This might be a development installation.")
+            return None
+            
+        with open(VERSION_FILE, 'r', encoding='utf-8') as f:
+            version_data = json.load(f)
+        
+        if isinstance(version_data, list) and len(version_data) > 0:
+            return version_data[0].get('version')
+        elif isinstance(version_data, dict):
+            return version_data.get('version')
+        else:
+            print_warning("Unexpected version file format.")
+            return None
+            
+    except Exception as e:
+        print_error(f"Failed to read current version: {e}")
+        return None
+
+
+def compare_versions(current: str, latest: str) -> int:
+    """Compare version strings. Returns: -1 (behind), 0 (same), 1 (ahead)."""
+    if not current or not latest:
+        return -1  # Assume upgrade needed if version unknown
+    
+    def parse_version(v):
+        # Parse version like "1.0.0-ayodele" -> [1, 0, 0, "ayodele"]
+        parts = v.split('-')
+        version_nums = parts[0].split('.')
+        nums = []
+        for num in version_nums:
+            try:
+                nums.append(int(num))
+            except ValueError:
+                nums.append(0)
+        
+        # Add pre-release identifier if present
+        if len(parts) > 1:
+            nums.append(parts[1])
+        
+        return nums
+    
+    current_parsed = parse_version(current)
+    latest_parsed = parse_version(latest)
+    
+    if current_parsed < latest_parsed:
+        return -1
+    elif current_parsed > latest_parsed:
+        return 1
+    else:
+        return 0
+
+
+# --- Repository Management ---
+
+def clone_latest_repository() -> bool:
+    """Clone the latest repository for upgrade."""
+    try:
+        print_step("Downloading Latest Application Code")
+        
+        # Remove existing clone directory if it exists
+        if REPO_CLONE_PATH.exists():
+            shutil.rmtree(REPO_CLONE_PATH)
+        
+        # Ensure parent directory exists
+        REPO_CLONE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Set up SSH command
+        env = os.environ.copy()
+        env['GIT_SSH_COMMAND'] = f'ssh -i {PRIVATE_KEY_FILE} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no'
+        
+        # Clone repository
+        print_info("Cloning repository...")
+        result = subprocess.run(
+            ['git', 'clone', '--depth', '1', REPO_URL, str(REPO_CLONE_PATH)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode != 0:
+            print_error(f"Failed to clone repository: {result.stderr}")
+            return False
+        
+        # Remove .git directory
+        git_dir = REPO_CLONE_PATH / ".git"
+        if git_dir.exists():
+            shutil.rmtree(git_dir)
+        
+        print_success("Repository cloned successfully.")
+        return True
+        
+    except subprocess.TimeoutExpired:
+        print_error("Repository cloning timed out. Please check your connection.")
+        return False
+    except Exception as e:
+        print_error(f"Failed to clone repository: {e}")
+        return False
+
+
+def compare_requirements() -> bool:
+    """Compare current and new requirements files. Returns True if they're different."""
+    try:
+        current_req = REQUIREMENTS_FILE
+        new_req = REPO_CLONE_PATH / "config" / "requirement.json"
+        
+        if not current_req.exists():
+            print_info("No existing requirements file found.")
+            return True  # Need to install dependencies
+        
+        if not new_req.exists():
+            print_warning("New requirements file not found.")
+            return False  # Skip dependency update
+        
+        # Compare file hashes for reliability
+        def get_file_hash(file_path):
+            with open(file_path, 'rb') as f:
+                return hashlib.md5(f.read()).hexdigest()
+        
+        current_hash = get_file_hash(current_req)
+        new_hash = get_file_hash(new_req)
+        
+        if current_hash == new_hash:
+            print_info("Requirements unchanged, skipping dependency update.")
+            return False
+        else:
+            print_info("Requirements changed, dependency update needed.")
+            return True
+            
+    except Exception as e:
+        print_warning(f"Could not compare requirements: {e}")
+        return True  # Be safe, update dependencies
+
+
+# --- Dependency Management ---
+
+def update_dependencies() -> bool:
+    """Update dependencies using the dependency script."""
+    try:
+        print_step("Updating Dependencies")
+        
+        dependency_script = REPO_CLONE_PATH / "bin" / SYSTEM_ID
+        
+        if not dependency_script.exists():
+            print_error(f"Dependency script not found: {dependency_script}")
+            return False
+        
+        # Make executable
+        dependency_script.chmod(0o755)
+        
+        # Detect Python executable (reuse install script logic)
+        python_cmd = "python3"
+        if Path("/opt/homebrew/bin/python3").exists():
+            python_cmd = "/opt/homebrew/bin/python3"
+        
+        print_info(f"Running dependency update with {python_cmd}...")
+        
+        # Run dependency script
+        result = subprocess.run(
+            [python_cmd, str(dependency_script)],
+            cwd=REPO_CLONE_PATH,
+            timeout=300  # 5 minute timeout
+        )
+        
+        if result.returncode == 0:
+            print_success("Dependencies updated successfully.")
+            return True
+        elif result.returncode == 2:
+            print_warning("Dependencies updated with warnings.")
+            return True
+        else:
+            print_error("Dependency update failed.")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        print_error("Dependency update timed out.")
+        return False
+    except Exception as e:
+        print_error(f"Failed to update dependencies: {e}")
+        return False
+
+
+# --- File Management ---
+
+def create_backup() -> Optional[Path]:
+    """Create a backup of the current installation."""
+    try:
+        timestamp = int(time.time())
+        backup_dir = MSG_ROOT.parent / f".msg.backup-{timestamp}"
+        
+        print_info(f"Creating backup: {backup_dir}")
+        shutil.copytree(MSG_ROOT, backup_dir)
+        
+        print_success(f"Backup created: {backup_dir}")
+        return backup_dir
+        
+    except Exception as e:
+        print_error(f"Failed to create backup: {e}")
+        return None
+
+
+def install_new_files() -> bool:
+    """Install new files while preserving custom configurations."""
+    try:
+        print_step("Installing Updated Files")
+        
+        # Create necessary directories
+        directories_to_ensure = [
+            MSG_ROOT / "custom_load",
+            MSG_ROOT / "bin",
+            MSG_ROOT / "config",
+            MSG_ROOT / ".nltk_data"
+        ]
+        
+        for directory in directories_to_ensure:
+            directory.mkdir(parents=True, exist_ok=True)
+        
+        # Use rsync-like copy with exclusions
+        print_info("Copying new files...")
+        
+        def copy_with_exclusions(src, dst, exclusions):
+            """Copy directory tree with exclusions."""
+            for item in src.rglob('*'):
+                if item.is_file():
+                    rel_path = item.relative_to(src)
+                    
+                    # Check if this file should be excluded
+                    should_exclude = False
+                    for exclusion in exclusions:
+                        if str(rel_path) == exclusion or rel_path.name == exclusion:
+                            should_exclude = True
+                            break
+                    
+                    if should_exclude:
+                        print(f"  📁 Preserving: {rel_path}")
+                        continue
+                    
+                    # Copy the file
+                    dst_file = dst / rel_path
+                    dst_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, dst_file)
+                    print(f"  📄 Updated: {rel_path}")
+        
+        # Define exclusions
+        exclusions = ["custom_config.yaml", "custom_load"]
+        
+        # Copy files
+        copy_with_exclusions(REPO_CLONE_PATH, MSG_ROOT, exclusions)
+        
+        print_success("Files installed successfully.")
+        return True
+        
+    except Exception as e:
+        print_error(f"Failed to install files: {e}")
+        return False
+
+
+def validate_installation() -> bool:
+    """Validate that the installation is working correctly."""
+    try:
+        print_step("Validating Installation")
+        
+        # Check critical files exist
+        critical_files = [
+            MSG_ROOT / "bin" / "dispatcher",
+            MSG_ROOT / "bin" / "msg_id",
+            MSG_ROOT / "bin" / "msg_tag", 
+            MSG_ROOT / "bin" / "printer",
+            MSG_ROOT / "config" / "config.yaml",
+            MSG_ROOT / "config" / "version.json"
+        ]
+        
+        for file_path in critical_files:
+            if not file_path.exists():
+                print_error(f"Critical file missing: {file_path}")
+                return False
+            print(f"  ✅ {file_path.name}")
+        
+        # Check executables have proper permissions
+        executables = [
+            MSG_ROOT / "bin" / "dispatcher",
+            MSG_ROOT / "bin" / "msg_id",
+            MSG_ROOT / "bin" / "msg_tag",
+            MSG_ROOT / "bin" / "printer",
+            MSG_ROOT / "bin" / "msg"
+        ]
+        
+        for executable in executables:
+            if executable.exists():
+                executable.chmod(0o755)
+                print(f"  🔧 Made executable: {executable.name}")
+        
+        print_success("Installation validation completed.")
+        return True
+        
+    except Exception as e:
+        print_error(f"Installation validation failed: {e}")
+        return False
+
+
+def cleanup_old_backups():
+    """Clean up old backup directories, keeping only the last 3."""
+    try:
+        backup_pattern = ".msg.backup-*"
+        backup_dirs = [d for d in MSG_ROOT.parent.glob(backup_pattern) if d.is_dir()]
+        
+        if len(backup_dirs) > 3:
+            # Sort by creation time and remove oldest
+            backup_dirs.sort(key=lambda x: x.stat().st_ctime)
+            to_remove = backup_dirs[:-3]  # Keep last 3
+            
+            for old_backup in to_remove:
+                shutil.rmtree(old_backup)
+                print_info(f"Cleaned old backup: {old_backup.name}")
+                
+    except Exception as e:
+        print_warning(f"Could not clean old backups: {e}")
+
+
+# --- Main Logic ---
+
+def main():
+    """Main upgrade function."""
+    print(f"\n{Colors.CYAN}{Colors.BOLD}{'='*60}")
+    print("🚀  MSG UPGRADE MANAGER  🚀")
+    print(f"{'='*60}{Colors.RESET}")
+    
+    # Parse arguments
+    force_upgrade = "--force" in sys.argv[1:]
+    
+    try:
+        # Phase 1: Authentication & Preparation
+        print_step("Phase 1: Authentication & Validation")
+        
+        if not check_ssh_authentication():
+            sys.exit(1)
+        
+        # Clean up any existing temporary directories
+        cleanup_directories()
+        
+        # Phase 2: Version Checking
+        print_step("Phase 2: Version Management")
+        
+        latest_version_info = download_latest_version_info()
+        if not latest_version_info:
+            print_error("Cannot proceed without version information.")
+            sys.exit(1)
+        
+        # Extract version from the downloaded info
+        if isinstance(latest_version_info, list) and len(latest_version_info) > 0:
+            latest_version = latest_version_info[0].get('version')
+        else:
+            latest_version = latest_version_info.get('version')
+        
+        if not latest_version:
+            print_error("Could not determine latest version.")
+            sys.exit(1)
+        
+        current_version = get_current_version()
+        print_info(f"Current version: {current_version or 'Unknown'}")
+        print_info(f"Latest version: {latest_version}")
+        
+        # Compare versions
+        if not force_upgrade:
+            if current_version:
+                version_comparison = compare_versions(current_version, latest_version)
+                
+                if version_comparison == 0:
+                    print_success("🎉 Application is up to date! No further action needed.")
+                    print()
+                    print(f"{Colors.GRAY}If you would like to force reset the application, use:")
+                    print(f"  msg --upgrade --force{Colors.RESET}")
+                    cleanup_directories()
+                    sys.exit(0)
+                elif version_comparison > 0:
+                    print_warning(f"You're running a newer version ({current_version}) than the latest release ({latest_version})!")
+                    print("This might be a development version.")
+                    print()
+                    print("Use --force to downgrade to the latest release version.")
+                    cleanup_directories()
+                    sys.exit(0)
+        
+        if force_upgrade:
+            print_warning("🔄 Force upgrade requested - will reinstall regardless of version")
+        
+        # Phase 3: Backup Creation
+        print_step("Phase 3: Backup & Preparation")
+        
+        backup_dir = create_backup()
+        if not backup_dir:
+            print_error("Could not create backup. Aborting upgrade for safety.")
+            sys.exit(1)
+        
+        # Phase 4: Download & Preparation
+        print_step("Phase 4: Repository Management")
+        
+        if not clone_latest_repository():
+            print_error("Failed to download latest code.")
+            sys.exit(1)
+        
+        # Phase 5: Dependency Management
+        print_step("Phase 5: Dependency Management")
+        
+        needs_dependency_update = compare_requirements()
+        
+        if needs_dependency_update:
+            if not update_dependencies():
+                print_error("Dependency update failed.")
+                # Could implement rollback here
+                sys.exit(1)
+        else:
+            print_success("Dependencies are up to date.")
+        
+        # Phase 6: Installation
+        print_step("Phase 6: File Installation")
+        
+        if not install_new_files():
+            print_error("File installation failed.")
+            sys.exit(1)
+        
+        # Phase 7: Validation
+        print_step("Phase 7: Validation & Finalization")
+        
+        if not validate_installation():
+            print_error("Installation validation failed.")
+            sys.exit(1)
+        
+        # Phase 8: Cleanup
+        print_step("Phase 8: Cleanup")
+        
+        cleanup_directories()
+        cleanup_old_backups()
+        
+        # Success message
+        print(f"\n{Colors.GREEN}{Colors.BOLD}{'='*60}")
+        print("🎉  UPGRADE COMPLETED SUCCESSFULLY!  🎉")
+        print(f"{'='*60}{Colors.RESET}")
+        print()
+        print_success(f"MSG has been upgraded to version {latest_version}!")
+        print()
+        print("What was updated:")
+        print("  🔄 Application code and scripts")
+        print("  🔄 Configuration files (base)")
+        print("  🔄 Dependencies (if needed)")
+        print()
+        print("What was preserved:")
+        print("  📁 Your custom configuration")
+        print("  📁 Your custom data files")
+        print("  💾 Backup created for safety")
+        print()
+        print(f"{Colors.CYAN}Your MSG tool is ready to use with the latest features!{Colors.RESET}")
+        
+    except KeyboardInterrupt:
+        print(f"\n\n{Colors.YELLOW}⚠️  Upgrade interrupted by user.{Colors.RESET}")
+        print("Cleaning up temporary files...")
+        cleanup_directories()
+        sys.exit(1)
+        
+    except Exception as e:
+        print_error(f"Unexpected error during upgrade: {e}")
+        print("Cleaning up temporary files...")
+        cleanup_directories()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

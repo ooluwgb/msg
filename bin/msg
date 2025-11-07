@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# msg - Wrapper script for the message management tool
+# This script ensures the dispatcher is called with the correct environment
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DISPATCHER="$SCRIPT_DIR/dispatcher"
+
+# Check if dispatcher exists
+if [[ ! -f "$DISPATCHER" ]]; then
+    echo "❌ Error: Dispatcher not found at $DISPATCHER"
+    echo "   Please reinstall the msg tool."
+    exit 1
+fi
+
+# Execute the dispatcher with all arguments
+exec python3 "$DISPATCHER" "$@"

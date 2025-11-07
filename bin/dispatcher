@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""
+Dispatcher - Central routing engine for the 'msg' tool
+Routes utility commands and orchestrates msg_id/msg_tag execution with session-based printing.
+"""
+import sys
+import subprocess
+import yaml
+import json
+from pathlib import Path
+from typing import List, Dict, Any, Tuple, Optional
+
+
+# --- Constants & Paths ---
+BASE_DIR = Path(__file__).resolve().parent.parent 
+BIN_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = BASE_DIR / "config" / "config.yaml"
+CUSTOM_CONFIG_FILE = BASE_DIR / "custom_config.yaml"
+
+# Script priorities for output ordering
+SCRIPT_PRIORITIES = {
+    "msg_id": 1,    # ID lookups display first
+    "msg_tag": 2,   # Search results display second
+}
+
+
+# --- Configuration Loading ---
+
+
+def load_yaml_config(config_path: Path) -> Dict[str, Any]:
+    """Loads base configuration with custom config override support."""
+    try:
+        # Load base configuration
+        with open(config_path, "r", encoding="utf-8") as f:
+            base_config = yaml.safe_load(f)
+            if not isinstance(base_config, dict):
+                raise ValueError("Base config file content is invalid.")
+        
+        # Load custom configuration if it exists
+        custom_config = {}
+        if CUSTOM_CONFIG_FILE.exists():
+            try:
+                with open(CUSTOM_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    custom_config = yaml.safe_load(f) or {}
+                    if not isinstance(custom_config, dict):
+                        custom_config = {}
+            except Exception as e:
+                print(f"⚠️  Warning: Failed to load custom config: {e}")
+                custom_config = {}
+        
+        # Merge configurations (custom overrides base)
+        final_config = base_config.copy()
+        final_config.update(custom_config)
+        
+        return {
+            "id_prefixes": [p.lower() for p in final_config.get("id_prefixes", [])]
+        }
+        
+    except Exception as e:
+        print(f"❌ Error: Failed to load configuration: {e}")
+        sys.exit(1)
+
+
+# --- Utility Command Handling ---
+
+
+def execute_utility(script_name: str, args: List[str] = []) -> None:
+    """Executes a utility script and exits the dispatcher."""
+    script_path = BIN_DIR / script_name
+    
+    if not script_path.exists():
+        print(f"❌ Error: Utility script '{script_name}' not found at {script_path}")
+        sys.exit(1)
+
+    try:
+        result = subprocess.run(
+            [sys.executable, script_path] + args,
+            check=False
+        )
+        sys.exit(result.returncode)
+        
+    except Exception as e:
+        print(f"❌ Error: Failed to execute {script_name}: {e}")
+        sys.exit(1)
+
+
+def handle_utility_commands(cli_args: List[str]) -> bool:
+    """
+    Checks for utility commands and executes them.
+    Returns True if a utility was executed (never returns in that case).
+    Returns False if no utility command found.
+    """
+    if not cli_args:
+        return False
+    
+    # Priority 1: --help (can combine with other utilities)
+    if "--help" in cli_args:
+        # Remove --help and pass everything else to help script
+        args_copy = cli_args.copy()
+        args_copy.remove("--help")
+        execute_utility("help", args_copy)
+        # Never returns
+    
+    # Priority 2: --set-default (takes all args after it)
+    if "--set-default" in cli_args:
+        try:
+            idx = cli_args.index("--set-default")
+            args_after = cli_args[idx + 1:]
+            execute_utility("default", args_after)
+            # Never returns
+        except Exception as e:
+            print(f"❌ Error: Failed to process --set-default: {e}")
+            sys.exit(1)
+    
+    # Priority 3: --upgrade (can take --force flag)
+    if "--upgrade" in cli_args:
+        try:
+            # Extract --force flag if present
+            upgrade_args = []
+            if "--force" in cli_args:
+                upgrade_args.append("--force")
+            
+            # Check for non-utility arguments (core commands) - exclude --force
+            non_utility_args = [
+                arg for arg in cli_args 
+                if arg not in ["--upgrade", "--force"] and not arg.startswith('-')
+            ]
+            
+            if non_utility_args:
+                print(f"❌ Error: Cannot mix --upgrade with IDs or keywords.")
+                print(f"   Non-utility arguments: {', '.join(non_utility_args)}")
+                sys.exit(1)
+            
+            execute_utility("upgrade", upgrade_args)
+            # Never returns
+        except Exception as e:
+            print(f"❌ Error: Failed to process --upgrade: {e}")
+            sys.exit(1)
+    
+    # Priority 4: Other utilities (exclusive, no args allowed)
+    other_utilities = {
+        "--init": "init",
+        "--version": "version",
+        "--uninstall": "uninstall"
+    }
+    
+    found_utilities = [flag for flag in other_utilities.keys() if flag in cli_args]
+    
+    if len(found_utilities) > 1:
+        print(f"❌ Error: Only one utility command allowed at a time.")
+        print(f"   Found: {', '.join(found_utilities)}")
+        sys.exit(1)
+    
+    if found_utilities:
+        utility_flag = found_utilities[0]
+        
+        # Check for non-utility arguments (core commands)
+        non_utility_args = [
+            arg for arg in cli_args 
+            if arg != utility_flag and not arg.startswith('-')
+        ]
+        
+        if non_utility_args:
+            print(f"❌ Error: Cannot mix utility commands with IDs or keywords.")
+            print(f"   Utility: {utility_flag}")
+            print(f"   Core arguments: {', '.join(non_utility_args)}")
+            sys.exit(1)
+        
+        # Execute utility
+        execute_utility(other_utilities[utility_flag])
+        # Never returns
+    
+    return False
+
+
+# --- Argument Partitioning ---
+
+
+def is_valid_id(arg: str, prefixes: List[str]) -> bool:
+    """Checks if an argument matches a valid ID pattern."""
+    if not arg or len(arg) < 2:
+        return False
+    
+    if not arg[-1].isdigit():
+        return False
+    
+    prefix_part = arg.rstrip('0123456789')
+    return prefix_part.lower() in prefixes
+
+
+def partition_arguments(args: List[str], prefixes: List[str]) -> Tuple[List[str], List[str]]:
+    """
+    Separates arguments into IDs for msg_id and keywords/flags for msg_tag.
+    """
+    ids_to_fetch: List[str] = []
+    remaining_args: List[str] = []
+    
+    for arg in args:
+        if not arg.startswith('-'):
+            if is_valid_id(arg, prefixes):
+                ids_to_fetch.append(arg)
+            else:
+                remaining_args.append(arg)
+        else:
+            # Flags go to msg_tag
+            remaining_args.append(arg)
+    
+    return ids_to_fetch, remaining_args
+
+
+# --- Session-Based Execution ---
+
+
+def start_printer_session(total_sources: int) -> Optional[subprocess.Popen]:
+    """
+    Starts the printer script in session mode.
+    Returns printer process or None if printer not available (fallback mode).
+    """
+    printer_path = BIN_DIR / "printer"
+    
+    # Check if printer exists
+    if not printer_path.exists():
+        print("⚠️  Warning: Printer script not found. Outputting raw JSON.\n", file=sys.stderr)
+        return None
+    
+    try:
+        printer_proc = subprocess.Popen(
+            [sys.executable, printer_path],
+            stdin=subprocess.PIPE,
+            text=True
+        )
+        
+        # Send session start message
+        session_start = json.dumps({
+            "session": "start",
+            "total_sources": total_sources
+        })
+        printer_proc.stdin.write(session_start + "\n")
+        printer_proc.stdin.flush()
+        
+        return printer_proc
+        
+    except Exception as e:
+        print(f"⚠️  Warning: Failed to start printer: {e}. Outputting raw JSON.\n", file=sys.stderr)
+        return None
+
+
+def execute_script_and_pipe(
+    script_name: str,
+    script_args: List[str],
+    priority: int,
+    printer_proc: Optional[subprocess.Popen]
+) -> int:
+    """
+    Executes a script and pipes to printer if available.
+    Falls back to printing raw JSON if printer is None.
+    Returns the script's exit code.
+    """
+    script_path = BIN_DIR / script_name
+    
+    try:
+        # Start the script
+        result = subprocess.run(
+            [sys.executable, script_path] + script_args,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if printer_proc is None:
+            # FALLBACK MODE: Print raw JSON directly to stdout
+            print(f"--- {script_name} output (priority {priority}) ---")
+            print(result.stdout)
+            if result.stderr:
+                print(result.stderr, file=sys.stderr)
+            print()
+        else:
+            # NORMAL MODE: Pipe to printer with session protocol
+            try:
+                script_output = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                # If JSON parsing fails, create error structure
+                script_output = {
+                    "mode": "unknown",
+                    "entries": [],
+                    "errors": [f"Failed to parse output from {script_name}"],
+                    "warnings": []
+                }
+            
+            # Wrap with priority and source info
+            wrapped_output = {
+                "priority": priority,
+                "source": script_name,
+                "data": script_output
+            }
+            
+            # Send to printer
+            printer_proc.stdin.write(json.dumps(wrapped_output) + "\n")
+            printer_proc.stdin.flush()
+        
+        return result.returncode
+        
+    except Exception as e:
+        if printer_proc is None:
+            # Fallback error handling
+            print(f"❌ Error: Failed to execute {script_name}: {e}")
+        else:
+            # Send error to printer
+            error_output = {
+                "priority": priority,
+                "source": script_name,
+                "data": {
+                    "mode": "error",
+                    "entries": [],
+                    "errors": [f"Failed to execute {script_name}: {e}"],
+                    "warnings": []
+                }
+            }
+            printer_proc.stdin.write(json.dumps(error_output) + "\n")
+            printer_proc.stdin.flush()
+        
+        return 1
+
+
+def close_printer_session(printer_proc: Optional[subprocess.Popen]) -> None:
+    """Closes the printer session if it exists."""
+    if printer_proc is None:
+        return  # No printer to close (fallback mode)
+    
+    try:
+        session_end = json.dumps({"session": "end"})
+        printer_proc.stdin.write(session_end + "\n")
+        printer_proc.stdin.close()
+        printer_proc.wait()
+    except Exception as e:
+        print(f"⚠️  Warning: Error closing printer session: {e}", file=sys.stderr)
+
+
+# --- Core Execution Logic ---
+
+
+def execute_core_commands(ids: List[str], keywords: List[str]) -> int:
+    """
+    Orchestrates msg_id and msg_tag execution with session-based printing.
+    Falls back to raw JSON output if printer not available.
+    Returns aggregated exit code.
+    """
+    # Determine which scripts to run
+    scripts_to_run = []
+    
+    if ids:
+        scripts_to_run.append(("msg_id", ids, SCRIPT_PRIORITIES["msg_id"]))
+    
+    if keywords:
+        scripts_to_run.append(("msg_tag", keywords, SCRIPT_PRIORITIES["msg_tag"]))
+    
+    # Handle case where no IDs or keywords (default list mode)
+    if not scripts_to_run:
+        scripts_to_run.append(("msg_tag", [], SCRIPT_PRIORITIES["msg_tag"]))
+    
+    # Start printer session (or activate fallback)
+    printer_proc = start_printer_session(len(scripts_to_run))
+    
+    # Execute scripts sequentially and pipe results
+    exit_codes = []
+    
+    for script_name, args, priority in scripts_to_run:
+        exit_code = execute_script_and_pipe(script_name, args, priority, printer_proc)
+        exit_codes.append(exit_code)
+    
+    # Close session
+    close_printer_session(printer_proc)
+    
+    # Return worst exit code
+    return max(exit_codes) if exit_codes else 0
+
+
+# --- Main Entry Point ---
+
+
+def main():
+    """Main dispatcher function."""
+    cli_args = sys.argv[1:]
+    
+    # Priority 1: Handle utility commands
+    handle_utility_commands(cli_args)
+    # If we reach here, no utility command was found
+    
+    # Priority 2: Handle core commands (msg_id/msg_tag)
+    config = load_yaml_config(CONFIG_FILE)
+    id_prefixes = config.get("id_prefixes", [])
+    
+    # Partition arguments (empty args = no IDs, no keywords = default list mode)
+    ids_to_fetch, remaining_args = partition_arguments(cli_args, id_prefixes)
+    
+    # Execute with session protocol (or fallback)
+    exit_code = execute_core_commands(ids_to_fetch, remaining_args)
+    
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    main()

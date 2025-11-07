@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""
+Version Display Module for the 'msg' command-line tool
+Displays the current version information from version.json
+"""
+import sys
+import json
+from pathlib import Path
+
+
+# --- Constants & Paths ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+VERSION_FILE = BASE_DIR / "config" / "version.json"
+
+
+# --- Color Codes ---
+class Colors:
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    RESET = '\033[0m'
+
+
+def print_version():
+    """Read and display version information from version.json."""
+    try:
+        if not VERSION_FILE.exists():
+            print(f"{Colors.RED}❌ Error: Version file not found at {VERSION_FILE}{Colors.RESET}")
+            print(f"   Please reinstall the msg tool.")
+            sys.exit(1)
+        
+        # Read version file
+        with open(VERSION_FILE, 'r', encoding='utf-8') as f:
+            version_data = json.load(f)
+        
+        # Display version information
+        print(f"\n{Colors.CYAN}{Colors.BOLD}MSG - Message Management Tool{Colors.RESET}")
+        print(f"{Colors.CYAN}{'='*40}{Colors.RESET}\n")
+        
+        # Handle both list and dict formats
+        if isinstance(version_data, list) and len(version_data) > 0:
+            version_info = version_data[0]
+        elif isinstance(version_data, dict):
+            version_info = version_data
+        else:
+            print(f"{Colors.YELLOW}⚠️  Warning: Unexpected version file format{Colors.RESET}")
+            print(f"\n{Colors.WHITE}Raw content:{Colors.RESET}")
+            print(json.dumps(version_data, indent=2))
+            sys.exit(0)
+        
+        # Display version
+        version = version_info.get('version', 'Unknown')
+        print(f"{Colors.WHITE}Version: {Colors.BOLD}{version}{Colors.RESET}")
+        
+        # Display additional info if available
+        if 'release_date' in version_info:
+            print(f"{Colors.WHITE}Released: {version_info['release_date']}{Colors.RESET}")
+        
+        if 'description' in version_info:
+            print(f"{Colors.WHITE}Description: {version_info['description']}{Colors.RESET}")
+        
+        print()
+        
+    except json.JSONDecodeError as e:
+        print(f"{Colors.RED}❌ Error: Failed to parse version file: {e}{Colors.RESET}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"{Colors.RED}❌ Error: Failed to read version: {e}{Colors.RESET}")
+        sys.exit(1)
+
+
+def main():
+    """Main version display function."""
+    print_version()
+
+
+if __name__ == "__main__":
+    main()

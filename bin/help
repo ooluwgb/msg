@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""
+Help Module for the 'msg' command-line tool
+Displays usage information, commands, and examples.
+"""
+import sys
+from pathlib import Path
+
+
+def print_header():
+    """Print the main header."""
+    print("\n" + "="*60)
+    print("  MSG - Message & Response Management Tool")
+    print("="*60)
+
+
+def print_usage():
+    """Print basic usage information."""
+    print("\nUSAGE:")
+    print("  msg [OPTIONS] [IDs] [KEYWORDS]")
+    print("  msg [UTILITY_COMMANDS]")
+
+
+def print_core_commands():
+    """Print core command information."""
+    print("\nCORE COMMANDS:")
+    print("  msg                    - List all available entries")
+    print("  msg ID1 ID2 ...        - Fetch entries by specific IDs (e.g., rsp1 esc2)")
+    print("  msg keyword1 keyword2  - Search entries by tags/keywords")
+    print("  msg ID1 keyword2       - Mix ID lookup and keyword search")
+    print("  msg -r keyword         - Search only response files")
+    print("  msg -e keyword         - Search only escalate files") 
+    print("  msg -w keyword         - Search only workflow files")
+    print("  msg -g keyword         - Search only grafana files")
+    print("  msg -d keyword         - Search only datalens files")
+    print("  msg -n keyword         - Search only npc files")
+    print("  msg -u keyword         - Search only url files")
+    print("  msg -a keyword         - Search files starting with 'a'")
+    print("  msg --all-files keyword- Search ALL files in all directories")
+    print("  msg keyword 5          - Limit search results to 5 entries")
+
+
+def print_utility_commands():
+    """Print utility command information."""
+    print("\nUTILITY COMMANDS:")
+    print("  msg --help            - Show this help message")
+    print("  msg --version         - Show version information")
+    print("  msg --init            - Initialize the msg tool")
+    print("  msg --upgrade         - Upgrade to latest version")
+    print("  msg --upgrade --force - Force upgrade/reinstall")
+    print("  msg --uninstall       - Uninstall the msg tool")
+    print("  msg --set-default -r  - Set response file as default")
+
+
+def print_examples():
+    """Print usage examples."""
+    print("\nEXAMPLES:")
+    print("  msg                     # List all available entries")
+    print("  msg rsp1                # Get response entry with ID 'rsp1'")
+    print("  msg payment billing     # Search for payment and billing related entries")
+    print("  msg -r customer         # Search customer-related entries in response files only")
+    print("  msg rsp1 payment        # Get rsp1 entry AND search for payment entries")
+    print("  msg incident 3          # Search for incident entries, show max 3 results")
+    print("  msg --all-files keyword # Search across ALL files")
+    print("  msg --set-default -e    # Set escalate files as default to load")
+
+
+def print_file_types():
+    """Print information about file types and prefixes."""
+    print("\nFILE TYPES & ID PREFIXES:")
+    print("  rsp  - Response messages and templates")
+    print("  esc  - Escalation procedures and workflows") 
+    print("  wrk  - Workflow URLs and process links")
+    print("  grf  - Grafana dashboard URLs")
+    print("  dtl  - DataLens dashboard URLs")
+    print("  npc  - NPC (Non-Player Character) or service information")
+    print("  url  - Useful URLs and resources")
+
+
+def print_configuration():
+    """Print configuration information."""
+    print("\nCONFIGURATION:")
+    print("  Base config:   ~/.msg/config/config.yaml")
+    print("  Custom config: ~/.msg/custom_config.yaml")
+    print("  Data files:    ~/.msg/default_load/ and ~/.msg/custom_load/")
+    print("  Custom config overrides base config settings")
+
+
+def print_footer():
+    """Print footer information."""
+    print("\nNOTES:")
+    print("  • ID lookups are case-insensitive")
+    print("  • Keywords are matched against entry tags")
+    print("  • Multiple flags can be combined (e.g., -rw)")
+    print("  • Custom configuration overrides base settings")
+    print("  • Use 'msg --help [COMMAND|FLAG]' for specific help")
+    print("    Examples:")
+    print("      msg --help --upgrade    # Show help for upgrade command")
+    print("      msg --help -r           # Show help for -r flag")
+    print("\nFor more information, check the documentation or contact support.")
+    print("="*60 + "\n")
+
+
+def show_specific_help(command: str):
+    """Show help for specific commands."""
+    if command in ['--init', 'init']:
+        print("\nINIT COMMAND:")
+        print("  msg --init")
+        print("  Initializes the msg tool with default configuration")
+        print("  Creates necessary directories and files")
+        
+    elif command in ['--version', 'version']:
+        print("\nVERSION COMMAND:")
+        print("  msg --version")
+        print("  Displays the current version of the msg tool")
+        print("  Shows version number and release information")
+        print("  Useful for troubleshooting and support")
+        
+    elif command in ['--upgrade', 'upgrade']:
+        print("\nUPGRADE COMMAND:")
+        print("  msg --upgrade")
+        print("  Updates the msg tool to the latest version")
+        print("  Downloads and installs new features and fixes")
+        print("  Preserves custom configurations and data")
+        print()
+        print("  msg --upgrade --force")
+        print("  Forces a complete reinstallation regardless of version")
+        print("  Useful for troubleshooting or resetting the installation")
+        print("  Creates a backup before proceeding")
+        
+    elif command in ['--set-default', 'set-default']:
+        print("\nSET-DEFAULT COMMAND:")
+        print("  msg --set-default [flags]")
+        print("  Sets which file types to load by default")
+        print("  Examples:")
+        print("    msg --set-default -r           # Load response files by default")
+        print("    msg --set-default -re          # Load response and escalate files")
+        print("    msg --set-default --all-files  # Load ALL files by default")
+        print("    msg --set-default custom.json  # Load specific file by default")
+        
+    elif command in ['--uninstall', 'uninstall']:
+        print("\nUNINSTALL COMMAND:")
+        print("  msg --uninstall")
+        print("  Removes the msg tool and all associated files")
+        print("  Use with caution - this action cannot be undone")
+    
+    # Support for core command flags
+    elif command == '-r':
+        print("\n-r FLAG (Response Files):")
+        print("  msg -r [keywords]")
+        print("  Loads only files starting with 'r' (e.g., response.json, ray.json)")
+        print("  Use this to search specifically in response-related files")
+        print("  Example: msg -r customer payment")
+        
+    elif command == '-e':
+        print("\n-e FLAG (Escalate Files):")
+        print("  msg -e [keywords]")
+        print("  Loads only files starting with 'e' (e.g., escalate.json)")
+        print("  Use this to search specifically in escalation-related files")
+        print("  Example: msg -e slack channel")
+        
+    elif command == '-w':
+        print("\n-w FLAG (Workflow Files):")
+        print("  msg -w [keywords]")
+        print("  Loads only files starting with 'w' (e.g., workflow.json)")
+        print("  Use this to search specifically in workflow-related files")
+        print("  Example: msg -w process approval")
+        
+    elif command == '-g':
+        print("\n-g FLAG (Grafana Files):")
+        print("  msg -g [keywords]")
+        print("  Loads only files starting with 'g' (e.g., grafana.json)")
+        print("  Use this to search specifically in Grafana dashboard files")
+        print("  Example: msg -g dashboard monitoring")
+        
+    elif command == '-d':
+        print("\n-d FLAG (DataLens Files):")
+        print("  msg -d [keywords]")
+        print("  Loads only files starting with 'd' (e.g., datalens.json)")
+        print("  Use this to search specifically in DataLens-related files")
+        print("  Example: msg -d analytics reports")
+        
+    elif command == '-n':
+        print("\n-n FLAG (NPC Files):")
+        print("  msg -n [keywords]")
+        print("  Loads only files starting with 'n' (e.g., npc.json)")
+        print("  Use this to search specifically in NPC/service information files")
+        print("  Example: msg -n service contact")
+        
+    elif command == '-u':
+        print("\n-u FLAG (URL Files):")
+        print("  msg -u [keywords]")
+        print("  Loads only files starting with 'u' (e.g., url.json)")
+        print("  Use this to search specifically in URL/resource files")
+        print("  Example: msg -u documentation link")
+        
+    elif command == '-a':
+        print("\n-a FLAG (Files Starting with 'a'):")
+        print("  msg -a [keywords]")
+        print("  Loads only files starting with 'a' (e.g., alerts.json, audit.json)")
+        print("  Use this to search specifically in files beginning with 'a'")
+        print("  Example: msg -a alert incident")
+        
+    elif command in ['--all-files', 'all-files']:
+        print("\n--all-files FLAG (Load All Files):")
+        print("  msg --all-files [keywords]")
+        print("  Loads ALL available files from all data directories")
+        print("  Use this for comprehensive searches across all data files")
+        print("  Example: msg --all-files customer issue")
+        print()
+        print("  Note: This loads every .json file in default_load/ and custom_load/")
+        print("  For faster searches, use specific flags like -r, -e, -w instead")
+        
+    else:
+        print(f"\nNo specific help available for: {command}")
+        print("Available commands: init, version, upgrade, set-default, uninstall")
+        print("Available flags: -r, -e, -w, -g, -d, -n, -u, -a, --all-files")
+
+
+def main():
+    """Main help function."""
+    args = sys.argv[1:]
+    
+    # Check if specific utility flag is provided for contextual help
+    utility_flags = ['--init', '--version', '--upgrade', '--set-default', '--uninstall', 'init', 'version', 'upgrade', 'set-default', 'uninstall']
+    core_flags = ['-r', '-e', '-w', '-g', '-d', '-n', '-u', '-a', '--all-files', 'all-files']
+    
+    # Find if any utility flag or core flag is in the arguments
+    found_command = None
+    for arg in args:
+        if arg in utility_flags or arg in core_flags:
+            found_command = arg
+            break
+    
+    if found_command:
+        # Show specific help for the utility command or core flag
+        show_specific_help(found_command)
+        return
+    
+    # Show general help (either --help alone or with unrecognized arguments)
+    print_header()
+    print_usage()
+    print_core_commands()
+    print_utility_commands()
+    print_examples()
+    print_file_types()
+    print_configuration()
+    print_footer()
+
+
+if __name__ == "__main__":
+    main()

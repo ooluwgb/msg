@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""
+Default Configuration Manager
+Handles --set-default flag functionality to update custom_config.yaml
+with user-specified default files based on flags or filenames.
+"""
+import sys
+import yaml
+from pathlib import Path
+from typing import List, Dict, Any, Set
+
+
+# --- Constants & Paths ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+CONFIG_FILE = BASE_DIR / "config" / "config.yaml"
+CUSTOM_CONFIG_FILE = BASE_DIR / "custom_config.yaml"
+
+
+# --- Helper Functions ---
+
+def print_step(message: str) -> None:
+    """Prints a stylized step header."""
+    print(f"\n\033[1m==> {message}\033[0m")
+
+
+def print_error(message: str) -> None:
+    """Prints an error message."""
+    print(f"\033[31m❌ Error: {message}\033[0m")
+
+
+def print_success(message: str) -> None:
+    """Prints a success message."""
+    print(f"\033[32m✅ {message}\033[0m")
+
+
+def print_warning(message: str) -> None:
+    """Prints a warning message."""
+    print(f"\033[33m⚠️  Warning: {message}\033[0m")
+
+
+def load_base_config() -> Dict[str, Any]:
+    """Load the base configuration to get data directories."""
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+            if not isinstance(config, dict):
+                raise ValueError("Invalid config format")
+            return config
+    except Exception as e:
+        print_error(f"Failed to load base configuration: {e}")
+        sys.exit(1)
+
+
+def find_files_by_letters(letters: Set[str], data_directories: List[str]) -> List[str]:
+    """Find all JSON files that start with the given letters in data directories."""
+    found_files = []
+    
+    for letter in sorted(letters):
+        letter_files = []
+        
+        for dir_name in data_directories:
+            directory_path = BASE_DIR / dir_name
+            if directory_path.is_dir():
+                pattern = f"{letter}*.json"
+                matching_files = list(directory_path.glob(pattern))
+                # Get just the filenames, not full paths
+                letter_files.extend([f.name for f in matching_files])
+        
+        if letter_files:
+            # Remove duplicates and add to found files
+            unique_files = list(dict.fromkeys(letter_files))  # Preserves order
+            found_files.extend(unique_files)
+            print(f"   Found for '{letter}': {', '.join(unique_files)}")
+        else:
+            print_warning(f"No files found starting with '{letter}' in data directories")
+    
+    return found_files
+
+
+def parse_arguments(args: List[str]) -> tuple[Set[str], List[str]]:
+    """
+    Parse command line arguments into flags (letters) and direct filenames.
+    Returns: (letters_set, filename_list)
+    Special handling: --all-files means load all files
+    """
+    letters = set()
+    filenames = []
+    load_all = False
+    
+    for arg in args:
+        if arg == '--all-files':
+            # Special flag to load all files
+            load_all = True
+        elif arg.startswith('-') and len(arg) > 1:
+            # Extract letters from flag (e.g., -rw -> ['r', 'w'])
+            flag_letters = arg[1:].lower()
+            for letter in flag_letters:
+                if letter.isalpha():
+                    letters.add(letter)
+                else:
+                    print_warning(f"Ignoring non-alphabetic character '{letter}' in flag '{arg}'")
+        elif arg.endswith('.json'):
+            # Direct filename specification
+            filenames.append(arg)
+        else:
+            print_warning(f"Ignoring unrecognized argument: '{arg}'")
+    
+    # If --all-files was specified, add a special marker
+    if load_all:
+        filenames.insert(0, "__ALL_FILES__")
+    
+    return letters, filenames
+
+
+def load_existing_custom_config() -> Dict[str, Any]:
+    """Load existing custom config or return empty dict."""
+    if CUSTOM_CONFIG_FILE.exists():
+        try:
+            with open(CUSTOM_CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+                if isinstance(config, dict):
+                    return config
+        except Exception as e:
+            print_warning(f"Failed to load existing custom config: {e}")
+    
+    return {}
+
+
+def save_custom_config(config: Dict[str, Any]) -> None:
+    """Save the updated custom configuration."""
+    try:
+        # Ensure directory exists
+        CUSTOM_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(CUSTOM_CONFIG_FILE, "w", encoding="utf-8") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        
+        print_success(f"Custom configuration saved to {CUSTOM_CONFIG_FILE}")
+        
+    except Exception as e:
+        print_error(f"Failed to save custom configuration: {e}")
+        sys.exit(1)
+
+
+def validate_files_exist(filenames: List[str], data_directories: List[str]) -> List[str]:
+    """Validate that specified files exist in data directories."""
+    valid_files = []
+    
+    for filename in filenames:
+        found = False
+        for dir_name in data_directories:
+            directory_path = BASE_DIR / dir_name
+            if (directory_path / filename).exists():
+                found = True
+                break
+        
+        if found:
+            valid_files.append(filename)
+            print(f"   Validated: {filename}")
+        else:
+            print_warning(f"File '{filename}' not found in data directories")
+    
+    return valid_files
+
+
+def display_summary(files: List[str]) -> None:
+    """Display a summary of what will be set as default."""
+    if files:
+        print(f"\n\033[36mFiles to be set as default:\033[0m")
+        for i, file in enumerate(files, 1):
+            print(f"  {i}. {file}")
+    else:
+        print_warning("No valid files specified for default loading")
+
+
+# --- Main Logic ---
+
+def main():
+    """Main function to handle default configuration setting."""
+    args = sys.argv[1:]
+    
+    if not args:
+        print_error("No arguments provided for --set-default")
+        print("Usage: msg --set-default [-letters] [file1.json] [file2.json] ...")
+        print("        msg --set-default --all-files")
+        print("Examples:")
+        print("  msg --set-default -r           # Set response files as default")
+        print("  msg --set-default -rw          # Set response and workflow files")
+        print("  msg --set-default custom.json  # Set specific file as default")
+        print("  msg --set-default -r custom.json # Combine flags and files")
+        print("  msg --set-default --all-files  # Set ALL files as default")
+        sys.exit(1)
+    
+    print_step("Setting Default Configuration")
+    
+    # Load base configuration to get data directories
+    base_config = load_base_config()
+    data_directories = base_config.get("data_load_directories", ["default_load", "custom_load"])
+    
+    # Parse command line arguments
+    letters, direct_filenames = parse_arguments(args)
+    
+    # Check if --all-files was specified
+    load_all = False
+    if direct_filenames and direct_filenames[0] == "__ALL_FILES__":
+        load_all = True
+        direct_filenames = direct_filenames[1:]  # Remove the marker
+    
+    print(f"Parsed arguments:")
+    if load_all:
+        print(f"  Mode: Load ALL files")
+    if letters:
+        print(f"  Flag letters: {', '.join(sorted(letters))}")
+    if direct_filenames:
+        print(f"  Direct files: {', '.join(direct_filenames)}")
+    
+    # Handle --all-files mode
+    if load_all:
+        print(f"\nSearching for ALL JSON files in data directories...")
+        all_json_files = []
+        for dir_name in data_directories:
+            directory_path = BASE_DIR / dir_name
+            if directory_path.is_dir():
+                json_files = list(directory_path.glob("*.json"))
+                all_json_files.extend([f.name for f in json_files])
+        
+        # Remove duplicates, preserve order
+        unique_files = list(dict.fromkeys(all_json_files))
+        
+        if not unique_files:
+            print_error("No JSON files found in data directories")
+            sys.exit(1)
+        
+        print(f"  Found {len(unique_files)} files")
+        
+        # Display summary and save
+        display_summary(unique_files)
+        custom_config = load_existing_custom_config()
+        custom_config["default_loaded_response_files"] = unique_files
+        print_step("Saving Configuration")
+        save_custom_config(custom_config)
+        print_success(f"All files successfully configured as default!")
+        print(f"\nNext time you run 'msg' without flags, ALL {len(unique_files)} files will be loaded.")
+        print(f"\n\033[90mNote: This overrides the base config. To reset to system defaults,")
+        print(f"delete the 'default_loaded_response_files' section from {CUSTOM_CONFIG_FILE}\033[0m")
+        sys.exit(0)
+    
+    # Find files based on letters
+    files_from_letters = []
+    if letters:
+        print(f"\nSearching for files starting with: {', '.join(sorted(letters))}")
+        files_from_letters = find_files_by_letters(letters, data_directories)
+    
+    # Validate direct filenames
+    valid_direct_files = []
+    if direct_filenames:
+        print(f"\nValidating direct filenames:")
+        valid_direct_files = validate_files_exist(direct_filenames, data_directories)
+    
+    # Combine all files and remove duplicates while preserving order
+    all_files = files_from_letters + valid_direct_files
+    unique_files = list(dict.fromkeys(all_files))  # Remove duplicates, preserve order
+    
+    if not unique_files:
+        print_error("No valid files found to set as default")
+        sys.exit(1)
+    
+    # Display summary
+    display_summary(unique_files)
+    
+    # Load existing custom config
+    custom_config = load_existing_custom_config()
+    
+    # Update the default_loaded_response_files
+    custom_config["default_loaded_response_files"] = unique_files
+    
+    # Save the updated configuration
+    print_step("Saving Configuration")
+    save_custom_config(custom_config)
+    
+    print_success(f"Default files successfully configured!")
+    print(f"\nNext time you run 'msg' without flags, these files will be loaded by default:")
+    for file in unique_files:
+        print(f"  • {file}")
+    
+    print(f"\n\033[90mNote: This overrides the base config. To reset to system defaults,")
+    print(f"delete the 'default_loaded_response_files' section from {CUSTOM_CONFIG_FILE}\033[0m")
+
+
+if __name__ == "__main__":
+    main()

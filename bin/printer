@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""
+Printer - Formats and displays output from msg_id and msg_tag
+Supports session protocol with configurable debug mode and color output.
+"""
+import sys
+import os
+import json
+import yaml
+from pathlib import Path
+from typing import List, Dict, Any, Tuple
+
+
+# --- Configuration ---
+BIN_DIR = Path(__file__).resolve().parent
+BASE_DIR = BIN_DIR.parent
+CONFIG_FILE = BASE_DIR / "config" / "config.yaml"
+CUSTOM_CONFIG_FILE = BASE_DIR / "custom_config.yaml"
+
+
+# --- Color Codes ---
+class Colors:
+    """ANSI color codes for terminal output."""
+    RESET = '\033[0m'
+    
+    # Text styles
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    
+    # Text colors
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    GRAY = '\033[90m'
+
+
+def load_config() -> Tuple[bool, bool]:
+    """Loads debug_mode and colored_output settings with custom config override support."""
+    try:
+        # Load base configuration
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            base_config = yaml.safe_load(f)
+            if not isinstance(base_config, dict):
+                base_config = {}
+        
+        # Load custom configuration if it exists
+        custom_config = {}
+        if CUSTOM_CONFIG_FILE.exists():
+            try:
+                with open(CUSTOM_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    custom_config = yaml.safe_load(f) or {}
+                    if not isinstance(custom_config, dict):
+                        custom_config = {}
+            except Exception:
+                custom_config = {}
+        
+        # Merge configurations (custom overrides base)
+        final_config = base_config.copy()
+        final_config.update(custom_config)
+        
+        debug_mode = final_config.get("debug_mode", False)
+        colored_output = final_config.get("colored_output", True)  # Default to True
+        return debug_mode, colored_output
+    except Exception:
+        return False, True  # Default: no debug, colors enabled
+
+
+def colorize(text: str, color_code: str, use_color: bool) -> str:
+    """Returns colored text if colors enabled, plain text otherwise."""
+    if use_color:
+        return f"{color_code}{text}{Colors.RESET}"
+    return text
+
+
+# --- Formatting Functions ---
+
+
+def get_terminal_width() -> int:
+    """Gets terminal width, with fallback to 100."""
+    try:
+        size = os.get_terminal_size()
+        return min(size.columns, 120)  # Cap at 120 for readability
+    except OSError:
+        return 100  # Fallback width
+
+
+def clear_screen():
+    """Clears the terminal screen."""
+    # Try ANSI escape code first (works on most terminals)
+    print('\033[2J\033[H', end='')
+    sys.stdout.flush()
+    
+    # Fallback to system command
+    os.system('clear' if os.name != 'nt' else 'cls')
+
+
+def format_entry(entry: Dict[str, Any], mode: str, use_color: bool) -> None:
+    """Formats and prints a single entry with optional colors."""
+    entry_id = entry.get('id', 'N/A')
+    description = entry.get('description', '(no description)')
+    content = entry.get('content')
+    terminal_width = get_terminal_width()
+    
+    if mode == "list":
+        # List mode: red description - [id] in cyan
+        print()
+        desc_colored = colorize(description, Colors.RED, use_color)
+        id_colored = colorize(f"[{entry_id}]", Colors.CYAN, use_color)
+        print(f"{desc_colored} - {id_colored}")
+    else:
+        # ID lookup or ranking mode: red bold description with cyan ID
+        print()
+        
+        if use_color:
+            desc_colored = f"{Colors.BOLD}{Colors.RED}{description}{Colors.RESET}"
+        else:
+            desc_colored = description
+        
+        id_colored = colorize(f"[{entry_id}]", Colors.CYAN, use_color)
+        print(f"{desc_colored} - {id_colored}")
+        
+        separator = colorize('-' * terminal_width, Colors.GRAY, use_color)
+        print(separator)
+        print()
+        
+        if content:
+            # Content in white (or plain if colors disabled)
+            if use_color:
+                print(f"{Colors.WHITE}", end='')
+            
+            if isinstance(content, list):
+                for item in content:
+                    print(item)
+            else:
+                print(content)
+            
+            if use_color:
+                print(Colors.RESET)
+            else:
+                print()  # Ensure newline in non-color mode
+        else:
+            # No content available
+            no_content_msg = colorize("(no content available)", Colors.DIM, use_color)
+            print(no_content_msg)
+        
+        separator_end = colorize('=' * terminal_width, Colors.GRAY, use_color)
+        print(separator_end)
+        print()
+
+
+def format_results(data: Dict[str, Any], debug: bool, use_color: bool) -> None:
+    """Formats results based on mode with optional colored errors and warnings."""
+    mode = data.get('mode', 'unknown')
+    entries = data.get('entries', [])
+    errors = data.get('errors', [])
+    warnings = data.get('warnings', [])
+    
+    # Print warnings first (yellow or plain)
+    if warnings:
+        warning_header = colorize("⚠️  Warnings:", Colors.YELLOW, use_color)
+        print(warning_header)
+        for warning in warnings:
+            bullet = colorize("•", Colors.YELLOW, use_color)
+            print(f"  {bullet} {warning}")
+        print()
+    
+    # Print errors (red or plain)
+    if errors:
+        error_header = colorize("❌ Errors:", Colors.RED, use_color)
+        print(error_header)
+        for error in errors:
+            bullet = colorize("•", Colors.RED, use_color)
+            print(f"  {bullet} {error}")
+        print()
+    
+    # Print entries
+    if entries:
+        for entry in entries:
+            format_entry(entry, mode, use_color)
+    elif not errors and not warnings:
+        print("No results found.")
+        print()
+
+
+def debug_print(message: str, debug: bool, use_color: bool) -> None:
+    """Prints debug messages to stderr if debug mode is enabled."""
+    if debug:
+        debug_msg = colorize(f"[DEBUG] {message}", Colors.DIM, use_color)
+        print(debug_msg, file=sys.stderr)
+
+
+# --- Main Function ---
+
+
+def main():
+    """Main printer function with session protocol support."""
+    debug, use_color = load_config()
+    clear_screen()
+    results = []
+    
+    # Read session messages from stdin
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line.strip())
+            
+            if msg.get("session") == "start":
+                # Session started
+                total = msg.get("total_sources", 0)
+                debug_print(f"Session started, expecting {total} source(s)", debug, use_color)
+                continue
+            
+            elif msg.get("session") == "end":
+                # Session ended, process all results
+                debug_print("Session ended, processing results", debug, use_color)
+                break
+            
+            else:
+                # Data message
+                priority = msg.get("priority", 999)
+                source = msg.get("source", "unknown")
+                data = msg.get("data", {})
+                
+                debug_print(f"Received from {source} (priority {priority})", debug, use_color)
+                
+                results.append({
+                    "priority": priority,
+                    "source": source,
+                    "data": data
+                })
+        
+        except json.JSONDecodeError as e:
+            error_msg = colorize(f"❌ Error: Failed to parse JSON from dispatcher: {e}", Colors.RED, use_color)
+            print(error_msg, file=sys.stderr)
+            continue
+    
+    # Sort by priority (lower number = higher priority)
+    results.sort(key=lambda x: x["priority"])
+    
+    # Format and display each result
+    for result in results:
+        data = result["data"]
+        format_results(data, debug, use_color)
+
+
+if __name__ == "__main__":
+    main()

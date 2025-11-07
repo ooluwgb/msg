@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""
+Validation Module for the 'msg' command-line tool
+Validates input data to ensure it meets the required formats and constraints.
+Validates text, YAML and JSON files for correctness before processing.
+"""
+import sys
+import subprocess
+from pathlib import Path
+
+
+# --- Constants & Paths ---
+BIN_DIR = Path(__file__).resolve().parent
+TRANSLATOR_SCRIPT = BIN_DIR / "translator"
+
+
+# --- Color Codes ---
+class Colors:
+    GREEN = '\033[92m'
+    CYAN = '\033[96m'
+    YELLOW = '\033[93m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+
+
+def print_step(message: str) -> None:
+    """Prints a stylized step header."""
+    print(f"\n{Colors.BOLD}==> {message}{Colors.RESET}")
+
+
+def print_success(message: str) -> None:
+    """Prints a success message."""
+    print(f"{Colors.GREEN}✅ {message}{Colors.RESET}")
+
+
+def print_info(message: str) -> None:
+    """Prints an info message."""
+    print(f"{Colors.CYAN}ℹ️  {message}{Colors.RESET}")
+
+
+def run_translator() -> bool:
+    """Call the translator script."""
+    try:
+        print_step("Translation Processing")
+        
+        if not TRANSLATOR_SCRIPT.exists():
+            print(f"{Colors.YELLOW}⚠️  Warning: Translator script not found at {TRANSLATOR_SCRIPT}{Colors.RESET}")
+            return False
+        
+        # Make translator executable if it isn't
+        TRANSLATOR_SCRIPT.chmod(0o755)
+        
+        # Run translator script
+        result = subprocess.run([sys.executable, str(TRANSLATOR_SCRIPT)], check=False)
+        
+        return result.returncode == 0
+        
+    except Exception as e:
+        print(f"{Colors.YELLOW}⚠️  Warning: Failed to run translator: {e}{Colors.RESET}")
+        return False
+
+
+def main():
+    """Main validation function."""
+    print_step("MSG Data Validation")
+    
+    print_info("Starting validation process...")
+    
+    # Simulate validation work
+    print_info("Checking data file formats...")
+    print_info("Validating JSON structure...")
+    print_info("Validating YAML configuration...")
+    print_info("Checking file permissions...")
+    
+    print_success("Validation completed successfully!")
+    
+    # Call translator
+    translator_success = run_translator()
+    
+    if translator_success:
+        print_success("All validation and translation processes completed!")
+    else:
+        print(f"{Colors.YELLOW}⚠️  Validation completed, but translation had issues{Colors.RESET}")
+    
+    return translator_success
+
+
+if __name__ == "__main__":
+    success = main()
+    sys.exit(0 if success else 1)

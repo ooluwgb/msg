@@ -1,0 +1,17 @@
+# Custom configuration overrides for the MSG tool
+# This file overrides settings from config/config.yaml
+# Uncomment and modify the settings you want to customize
+
+# Example: Override which files to load by default
+# default_loaded_response_files:
+#   - response.json
+#   - url.json
+#   - escalate.json
+
+# Example: Change the maximum number of search results displayed
+# max_display_results: 5
+
+# Example: Specify data directories (order matters - first has priority)
+# data_load_directories:
+#   - custom_load
+#   - default_load

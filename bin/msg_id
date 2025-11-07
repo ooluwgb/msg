@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""
+msg_id - ID Lookup Engine
+Fetches entries by exact ID match and outputs JSON.
+No formatting logic - pure data retrieval.
+"""
+import json
+import sys
+import yaml
+from pathlib import Path
+from typing import List, Dict, Tuple, Any
+
+
+# Path resolution
+BASE_DIR = Path(__file__).resolve().parent.parent 
+CONFIG_FILE = BASE_DIR / "config" / "config.yaml"
+CUSTOM_CONFIG_FILE = BASE_DIR / "custom_config.yaml"
+
+
+# --- Configuration Loading ---
+
+
+def load_yaml_config(config_path=CONFIG_FILE) -> Dict[str, Any]:
+    """Loads and validates the application configuration with custom config override support."""
+    try:
+        # Load base configuration
+        with open(config_path, "r", encoding="utf-8") as f:
+            base_config = yaml.safe_load(f)
+            if not isinstance(base_config, dict):
+                raise ValueError("Base config file content is invalid.")
+        
+        # Load custom configuration if it exists
+        custom_config = {}
+        if CUSTOM_CONFIG_FILE.exists():
+            try:
+                with open(CUSTOM_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    custom_config = yaml.safe_load(f) or {}
+                    if not isinstance(custom_config, dict):
+                        custom_config = {}
+            except Exception as e:
+                # Return error structure instead of printing
+                return {
+                    "data_load_directories": [],
+                    "config_error": f"Failed to load custom config: {e}"
+                }
+        
+        # Merge configurations (custom overrides base)
+        final_config = base_config.copy()
+        final_config.update(custom_config)
+        
+        data_load_directories = final_config.get("data_load_directories", [])
+        if not isinstance(data_load_directories, list):
+            raise ValueError("'data_load_directories' in config files must be a list.")
+            
+        return {
+            "data_load_directories": data_load_directories
+        }
+        
+    except Exception as e:
+        # Return error structure instead of printing
+        return {
+            "data_load_directories": [],
+            "config_error": f"Failed to load config files: {e}"
+        }
+
+
+# --- Helper Functions ---
+
+
+def _load_json_file(file_path: Path) -> List[Dict[str, Any]]:
+    """Robustly loads a JSON file from the given path."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, list):
+                return [data]
+            return data
+    except Exception:
+        return []
+
+
+def _extract_content(entry: Dict[str, Any]) -> Any:
+    """Extracts the primary content, regardless of the key (message, url, content, etc.)."""
+    content_keys = ['message', 'content', 'workflow_url', 'grafana_url', 'datalens_url', 'usefull_url']
+    for key in content_keys:
+        if key in entry:
+            return entry[key]
+    return "N/A (Content Field Missing)"
+
+
+# --- Core ID Fetching Logic ---
+
+
+def fetch_ids_with_targeted_loading(
+    ids: List[str], 
+    load_directories: List[str],
+    warnings: List[str]
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Retrieves content for a list of IDs using targeted file loading."""
+    if not ids:
+        return [], []
+        
+    unique_first_letters = {i[0].lower() for i in ids}
+    loaded_data_cache: Dict[str, List[Dict[str, Any]]] = {}
+    id_results: List[Dict[str, Any]] = []
+    error_messages: List[str] = []
+
+    # 1. Targeted File Loading & Caching
+    for letter in unique_first_letters:
+        matching_files = []
+        
+        for dir_name in load_directories:
+            directory_path = BASE_DIR / dir_name
+            if directory_path.is_dir():
+                matching_files.extend(list(directory_path.glob(f"{letter}*.json")))
+            else:
+                # Non-critical: directory doesn't exist, add warning
+                warnings.append(f"Directory '{dir_name}' not found.")
+        
+        if not matching_files:
+            error_messages.append(
+                f"No file beginning with '{letter}' found in any configured directory."
+            )
+            continue
+        
+        file_path = matching_files[0] 
+        data = _load_json_file(file_path)
+        
+        if not data:
+             error_messages.append(
+                f"File '{file_path.name}' was found but could not be loaded or is empty."
+            )
+             continue
+
+        loaded_data_cache[letter] = data
+        
+    # 2. Search All IDs in the Loaded Cache
+    for target_id in ids:
+        first_letter = target_id[0].lower()
+        
+        if first_letter not in loaded_data_cache:
+            continue
+            
+        data = loaded_data_cache[first_letter]
+        
+        found_entry = next(
+            (entry for entry in data if entry.get('id', '').lower() == target_id.lower()), 
+            None
+        )
+        
+        if found_entry:
+            # Use lowercase keys for JSON output
+            entry_data = {
+                "id": found_entry.get('id', 'N/A'),
+                "description": found_entry.get('description', '(no description)'),
+                "content": _extract_content(found_entry) 
+            }
+            id_results.append(entry_data)
+        else:
+            error_messages.append(
+                f"ID '{target_id}' was not found in the loaded file (starting with '{first_letter}')."
+            )
+
+    return error_messages, id_results
+
+
+# --- STANDALONE EXECUTION BLOCK ---
+
+
+if __name__ == "__main__":
+    # Get IDs from the command line
+    ids_from_cli = sys.argv[1:]
+    global_warnings: List[str] = []
+    
+    # Handle empty input
+    if not ids_from_cli:
+        output = {
+            "mode": "id_lookup",
+            "entries": [],
+            "errors": ["No IDs provided. Usage: msg_id ID1 ID2 ..."],
+            "warnings": []
+        }
+        print(json.dumps(output))
+        sys.exit(1)
+        
+    # 1. Load configuration
+    config = load_yaml_config()
+    
+    # Check for config errors
+    if "config_error" in config:
+        output = {
+            "mode": "id_lookup",
+            "entries": [],
+            "errors": [config["config_error"]],
+            "warnings": []
+        }
+        print(json.dumps(output))
+        sys.exit(1)
+    
+    load_dirs = config.get("data_load_directories", [])
+    
+    # 2. Call the core retrieval function
+    errors, results = fetch_ids_with_targeted_loading(ids_from_cli, load_dirs, global_warnings)
+    
+    # 3. Output JSON
+    output = {
+        "mode": "id_lookup",
+        "entries": results,
+        "errors": errors,
+        "warnings": global_warnings
+    }
+    
+    print(json.dumps(output))
+    
+    # Exit code: 0 if any results found, 1 if total failure
+    sys.exit(0 if results else 1)
