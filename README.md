@@ -1,5 +1,9 @@
 # MSG - Message Management Tool
 
+[![Version](https://img.shields.io/badge/version-1.0.0--ayodele-blue.svg)](https://github.com/ooluwgb/msg_development)
+[![Python](https://img.shields.io/badge/python-3.8+-green.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 A sophisticated command-line tool for managing, searching, and retrieving message templates, responses, and documentation. Designed for support teams and operations personnel who need quick access to standardized messages, escalation procedures, and useful resources.
 
 ---
