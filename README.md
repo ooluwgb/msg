@@ -87,21 +87,6 @@ Execute the following command in your terminal to download and run the installer
 curl -sSL https://raw.githubusercontent.com/ooluwgb/msg/main/bin/install.sh | bash
 ```
 
-### Manual Installation Steps (If curl | bash fails)
-
-#### 1. Download the Installation Script
-
-```bash
-curl -o install.sh https://raw.githubusercontent.com/ooluwgb/msg/main/bin/install.sh
-```
-
-#### 2. Run the Installer
-
-```bash
-chmod +x install.sh
-./install.sh
-```
-
 ### Installation Process
 
 The installer checks system compatibility, installs dependencies, and sets up global command access.
